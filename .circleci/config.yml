@@ -225,6 +225,31 @@ jobs:
           command: |
             docker push docker.pkg.github.com/hashicorp/waypoint/alpha
 
+  website-deploy:
+    docker:
+      # Use a modern Circle image as we just need npm
+      - image: cimg/base:2020.07-20.04
+    environment:
+      <<: *ENVIRONMENT
+    shell: /usr/bin/env bash -euo pipefail -c
+    working_directory: website
+    steps:
+      - add_ssh_keys:
+          fingerprints:
+            - "c6:96:98:82:dc:04:6c:39:dd:ac:83:05:e3:15:1c:98"
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          name: "npm: Install Vercel"
+          command: |
+            npm install -g vercel
+      - run:
+          name: "npm: Deploy Website"
+          command: |
+            vercel deploy -t $VERCEL_TOKEN
+
+
   # todo: re-enable when we need a UI
   #
   # build frontend yarn cache
@@ -334,6 +359,14 @@ workflows:
           requires:
             - integration
             - dev-build
+          filters:
+            branches:
+              only:
+                - master
+
+  website:
+    jobs:
+      - website-deploy:
           filters:
             branches:
               only:
