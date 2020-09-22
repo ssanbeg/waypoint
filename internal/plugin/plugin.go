@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/waypoint/builtin/docker"
 	"github.com/hashicorp/waypoint/builtin/files"
 	"github.com/hashicorp/waypoint/builtin/google/cloudrun"
+	"github.com/hashicorp/waypoint/builtin/guide/golang"
 	"github.com/hashicorp/waypoint/builtin/k8s"
 	"github.com/hashicorp/waypoint/builtin/netlify"
 	"github.com/hashicorp/waypoint/builtin/nomad"
@@ -42,6 +43,7 @@ var (
 		"aws-ami":                  ami.Options,
 		"aws-ec2":                  ec2.Options,
 		"aws-alb":                  alb.Options,
+		"go":                       golang.Options,
 	}
 )
 
@@ -50,6 +52,7 @@ func init() {
 	Builders.Register("files", BuiltinFactory("files", component.BuilderType))
 	Builders.Register("pack", BuiltinFactory("pack", component.BuilderType))
 	Builders.Register("aws-ami", BuiltinFactory("aws-ami", component.BuilderType))
+	Builders.Register("go", BuiltinFactory("go", component.BuilderType))
 
 	Registries.Register("docker", BuiltinFactory("docker", component.RegistryType))
 	Registries.Register("files", BuiltinFactory("files", component.RegistryType))
