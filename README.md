@@ -50,6 +50,10 @@ _Note: Start a new shell before proceeding._
 In the directory you cloned this repo to, allow `direnv` to load this project's `.envrc` file:
 
 ```
+# Note: when you `cd` into the waypoint directory for the first time after
+# installing direnv you will get an error telling you to allow the .envrc,
+# which you will do now:
+
 # in waypoint git dir
 direnv allow
 ```
