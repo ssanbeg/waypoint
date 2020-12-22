@@ -1,21 +1,20 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 	"github.com/hashicorp/waypoint/internal/clierrors"
 	"github.com/hashicorp/waypoint/internal/pkg/flag"
 	pb "github.com/hashicorp/waypoint/internal/server/gen"
-	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 	"github.com/posener/complete"
 )
 
 type ConfigSetCommand struct {
 	*baseCommand
-
-	app string
 }
 
 func (c *ConfigSetCommand) Run(args []string) int {
@@ -27,9 +26,25 @@ func (c *ConfigSetCommand) Run(args []string) int {
 		return 1
 	}
 
+	// If there are no command arguments, check if the command has
+	// been invoked with a pipe like `cat .env | waypoint config set`.
 	if len(c.args) == 0 {
-		fmt.Fprintf(os.Stderr, "config-set requires at least one key=value entry")
-		return 1
+		info, err := os.Stdin.Stat()
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "failed to get console mode for stdin")
+			return 1
+		}
+
+		// If there's no pipe, there are no arguments. Fail.
+		if info.Mode()&os.ModeNamedPipe == 0 {
+			_, _ = fmt.Fprintf(os.Stderr, "config set requires at least one key=value entry")
+			return 1
+		}
+
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			c.args = append(c.args, scanner.Text())
+		}
 	}
 
 	// Get our API client
@@ -45,11 +60,13 @@ func (c *ConfigSetCommand) Run(args []string) int {
 		}
 
 		configVar := &pb.ConfigVar{
-			Name:  arg[:idx],
-			Value: arg[idx+1:],
+			Name: arg[:idx],
+			Value: &pb.ConfigVar_Static{
+				Static: arg[idx+1:],
+			},
 		}
 
-		if c.app == "" {
+		if c.flagApp == "" {
 			configVar.Scope = &pb.ConfigVar_Project{
 				Project: c.project.Ref(),
 			}
@@ -57,7 +74,7 @@ func (c *ConfigSetCommand) Run(args []string) int {
 			configVar.Scope = &pb.ConfigVar_Application{
 				Application: &pb.Ref_Application{
 					Project:     c.project.Ref().Project,
-					Application: c.app,
+					Application: c.flagApp,
 				},
 			}
 		}
@@ -75,14 +92,7 @@ func (c *ConfigSetCommand) Run(args []string) int {
 }
 
 func (c *ConfigSetCommand) Flags() *flag.Sets {
-	return c.flagSet(0, func(set *flag.Sets) {
-		f := set.NewSet("Command Options")
-		f.StringVar(&flag.StringVar{
-			Name:   "app",
-			Target: &c.app,
-			Usage:  "Scope the variables to a specific app.",
-		})
-	})
+	return c.flagSet(0, nil)
 }
 
 func (c *ConfigSetCommand) AutocompleteArgs() complete.Predictor {
@@ -99,9 +109,13 @@ func (c *ConfigSetCommand) Synopsis() string {
 
 func (c *ConfigSetCommand) Help() string {
 	return formatHelp(`
-Usage: waypoint config-set <name> <value>
+Usage: waypoint config set <name>=<value>
 
-  Set a config variable that will be available to deployments as an environment variable.
+  Set a config variable that will be available to deployments as an
+  environment variable.
+
+  This will scope the variable to the entire project by default.
+  Specify the "-app" flag to set a config variable for a specific app.
 
 `)
 }

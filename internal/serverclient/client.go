@@ -11,8 +11,8 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/hashicorp/waypoint/internal/clicontext"
-	"github.com/hashicorp/waypoint/internal/config"
 	"github.com/hashicorp/waypoint/internal/protocolversion"
+	"github.com/hashicorp/waypoint/internal/serverconfig"
 )
 
 // ConnectOption is used to configure how Waypoint server connection
@@ -43,22 +43,24 @@ func Connect(ctx context.Context, opts ...ConnectOption) (*grpc.ClientConn, erro
 		return nil, fmt.Errorf("no server credentials found")
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+
 	// Build our options
 	grpcOpts := []grpc.DialOption{
 		grpc.WithBlock(),
-		grpc.WithTimeout(cfg.Timeout),
 		grpc.WithUnaryInterceptor(protocolversion.UnaryClientInterceptor(protocolversion.Current())),
 		grpc.WithStreamInterceptor(protocolversion.StreamClientInterceptor(protocolversion.Current())),
 	}
+
 	if !cfg.Tls {
 		grpcOpts = append(grpcOpts, grpc.WithInsecure())
-	} else {
-		if cfg.TlsSkipVerify {
-			grpcOpts = append(grpcOpts, grpc.WithTransportCredentials(
-				credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}),
-			))
-		}
+	} else if cfg.TlsSkipVerify {
+		grpcOpts = append(grpcOpts, grpc.WithTransportCredentials(
+			credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}),
+		))
 	}
+
 	if cfg.Auth {
 		token := cfg.Token
 		if v := os.Getenv(EnvServerToken); v != "" {
@@ -89,7 +91,7 @@ func ContextConfig(opts ...ConnectOption) (*clicontext.Config, error) {
 
 	// Build it
 	return &clicontext.Config{
-		Server: config.Server{
+		Server: serverconfig.Client{
 			Address:       cfg.Addr,
 			Tls:           cfg.Tls,
 			TlsSkipVerify: cfg.TlsSkipVerify,

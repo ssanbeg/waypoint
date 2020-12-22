@@ -3,15 +3,15 @@ version: 2.1
 
 references:
   images:
-    go: &GOLANG_IMAGE circleci/golang:1.14.3
-    middleman: &MIDDLEMAN_IMAGE hashicorp/middleman-hashicorp:0.3.44
-    ember: &EMBER_IMAGE circleci/node:12-browsers
+    go: &GOLANG_IMAGE docker.mirror.hashicorp.services/circleci/golang:1.15.3
+    middleman: &MIDDLEMAN_IMAGE docker.mirror.hashicorp.services/hashicorp/middleman-hashicorp:0.3.44
+    ember: &EMBER_IMAGE docker.mirror.hashicorp.services/circleci/node:12-browsers
 
   paths:
     test-results: &TEST_RESULTS_DIR /tmp/test-results
 
   cache:
-    yarn: &YARN_CACHE_KEY waypoint-ui-v1-{{ checksum "ui/yarn.lock" }}
+    yarn: &YARN_CACHE_KEY waypoint-ui-v1-{{ checksum "ui/yarn.lock" }}-{{ checksum "uilib.md5" }}
     rubygem: &RUBYGEM_CACHE_KEY static-site-gems-v1-{{ checksum "Gemfile.lock" }}
 
   environment: &ENVIRONMENT
@@ -21,10 +21,9 @@ references:
     GIT_AUTHOR_NAME: circleci-waypoint
     GIT_COMMITTER_NAME: circleci-waypoint
     BASH_ENV: /home/circleci/project/.circleci/bash_env.sh
-    CIRCLE_BASE_URL: "https://circleci.com/workflow-run"
     DOCKER_BUILDKIT: 1
     REBUILD_UI: &REBUILD_UI 1
-    
+
 jobs:
   # Runs Go linters
   lint:
@@ -49,6 +48,7 @@ jobs:
             golangci-lint run --build-tags="$GOTAGS" -v --concurrency 2 \
               --disable-all \
               --timeout 10m \
+              --enable gofmt \
               --enable gosimple \
               --enable govet
       - notify_main_failure
@@ -76,17 +76,17 @@ jobs:
   go-test:
     docker:
       - image: *GOLANG_IMAGE
-      - image: localstack/localstack:latest
-      - image: letsencrypt/pebble
+      - image: docker.mirror.hashicorp.services/localstack/localstack:latest
+      - image: docker.mirror.hashicorp.services/letsencrypt/pebble
         command: ["pebble"]
         environment:
           PEBBLE_VA_NOSLEEP: 1
           PEBBLE_VA_ALWAYS_VALID: 1
-      - image: circleci/postgres:11-alpine
+      - image: docker.mirror.hashicorp.services/circleci/postgres:11-alpine
         environment:
           POSTGRES_USER: postgres
           POSTGRES_DB: waypoint_test
-      - image: vault
+      - image: docker.mirror.hashicorp.services/vault
         command: ["server", "-dev", "-dev-root-token-id=hznroot"]
     parallelism: 4
     environment:
@@ -141,7 +141,7 @@ jobs:
       - store_artifacts:
           path: *TEST_RESULTS_DIR
       - notify_main_failure
-  
+
   # create a development build
   dev-build:
     docker:
@@ -191,7 +191,7 @@ jobs:
   image-release:
     docker:
       # Use a modern Circle image as we just need up-to-date Docker here
-      - image: cimg/base:2020.07-20.04
+      - image: docker.mirror.hashicorp.services/cimg/base:2020.07-20.04
     environment:
       <<: *ENVIRONMENT
     shell: /usr/bin/env bash -euo pipefail -c
@@ -238,6 +238,7 @@ jobs:
       <<: *ENVIRONMENT
     steps:
       - checkout
+      - md5uilib
       # cache yarn deps
       - restore_cache:
           key: *YARN_CACHE_KEY
@@ -279,6 +280,7 @@ jobs:
       JOBS: 2 # limit parallelism for broccoli-babel-transpiler
     steps:
       - checkout
+      - md5uilib
       - restore_cache:
           key: *YARN_CACHE_KEY
       - run: cd ui && make
@@ -340,6 +342,18 @@ jobs:
               echo "no UI changes so no static assets to publish"
             fi
       - notify_main_failure
+  
+  algolia-index:
+    docker:
+      - image: docker.mirror.hashicorp.services/node:12
+    steps:
+      - checkout
+      - run:
+          name: Push content to Algolia Index
+          command: |
+            cd website/
+            npm install
+            node scripts/index_search_content.js
 
   # # run ember frontend tests
   # ember-test:
@@ -378,10 +392,16 @@ workflows:
   version: 2
   go-tests:
     jobs:
-      - check-vendor
       - lint
-      - go-test
+      - check-vendor:
+          requires:
+            - lint
+      - go-test:
+          requires:
+            - lint
       - dev-build:
+          requires:
+            - lint
           filters:
             branches:
               ignore:
@@ -389,7 +409,10 @@ workflows:
 
   integration:
     jobs:
-      - frontend-cache
+      - lint
+      - frontend-cache:
+          requires:
+            - lint
       - ember-build-prod:
           requires:
             - frontend-cache
@@ -416,6 +439,13 @@ workflows:
             branches:
               only:
                 - main
+  website:
+    jobs:
+      - algolia-index:
+          filters:
+            branches:
+              only:
+                - stable-website
 
   # website:
   #   jobs:
@@ -444,6 +474,10 @@ workflows:
   #           - ember-build
 
 commands:
+  md5uilib:
+    description: "md5 hash of ui/lib directory"
+    steps:
+      - run: find ui/lib -type f | sort | xargs md5sum > uilib.md5
   notify_main_failure:
     steps:
       - run:
@@ -476,7 +510,7 @@ commands:
                         }, \
                         { \
                             \"title\": \"Full Workflow\", \
-                            \"value\": \"<${CIRCLE_BASE_URL}/${CIRCLE_WORKFLOW_ID}|${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}>\", \
+                            \"value\": \"<https://circleci.com/workflow-run/${CIRCLE_WORKFLOW_ID}|${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}>\", \
                             \"short\": \"true\" \
                         } \
                     ], \

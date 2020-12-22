@@ -6,15 +6,15 @@ GIT_COMMIT=$$(git rev-parse --short HEAD)
 GIT_DIRTY=$$(test -n "`git status --porcelain`" && echo "+CHANGES" || true)
 GIT_DESCRIBE=$$(git describe --tags --always --match "v*")
 GIT_IMPORT="github.com/hashicorp/waypoint/internal/version"
-GOLDFLAGS="-X $(GIT_IMPORT).GitCommit=$(GIT_COMMIT)$(GIT_DIRTY) -X $(GIT_IMPORT).GitDescribe=$(GIT_DESCRIBE)"
+GOLDFLAGS="-s -w -X $(GIT_IMPORT).GitCommit=$(GIT_COMMIT)$(GIT_DIRTY) -X $(GIT_IMPORT).GitDescribe=$(GIT_DESCRIBE)"
 CGO_ENABLED?=0
+GO_CMD?=go
 
 .PHONY: bin
 bin: # bin creates the binaries for Waypoint for the current platform
-	GOOS=linux GOARCH=amd64 go build -o ./internal/assets/ceb/ceb ./cmd/waypoint-entrypoint
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ./internal/assets/ceb/ceb ./cmd/waypoint-entrypoint
 	cd internal/assets && go-bindata -pkg assets -o prod.go -tags assetsembedded ./ceb
 	CGO_ENABLED=$(CGO_ENABLED) go build -ldflags $(GOLDFLAGS) -tags assetsembedded -o ./waypoint ./cmd/waypoint
-	go build -tags assetsembedded -o ./waypoint-entrypoint ./cmd/waypoint-entrypoint
 
 .PHONY: bin/windows
 bin/windows: # create windows binaries
@@ -22,13 +22,17 @@ bin/windows: # create windows binaries
 	cd internal/assets && go-bindata -pkg assets -o prod.go -tags assetsembedded ./ceb
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) go build -ldflags $(GOLDFLAGS) -tags assetsembedded -o ./waypoint.exe ./cmd/waypoint
 
-.PHONY: bin/linux
-bin/linux: # create Linux binaries
-	GOOS=linux GOARCH=amd64 $(MAKE) bin
+.PHONY: bin/entrypoint
+bin/entrypoint: # create the entrypoint for the current platform
+	CGO_ENABLED=0 go build -tags assetsembedded -o ./waypoint-entrypoint ./cmd/waypoint-entrypoint
 
 .PHONY: test
 test: # run tests
 	go test ./...
+
+.PHONY: format
+format: # format go code
+	gofmt -s -w ./
 
 .PHONY: docker/mitchellh
 docker/mitchellh:
@@ -36,7 +40,7 @@ docker/mitchellh:
 					--ssh default \
 					--secret id=ssh.config,src="${HOME}/.ssh/config" \
 					--secret id=ssh.key,src="${HOME}/.ssh/config" \
-					-t waypoint:latest \
+					-t waypoint:dev \
 					.
 
 .PHONY: docker/evanphx
@@ -79,7 +83,7 @@ gen/ts:
 # This currently assumes you have run `ember build` in the ui/ directory
 static-assets:
 	@go-bindata -pkg gen -prefix dist -o $(ASSETFS_PATH) ./ui/dist/...
-	@go fmt $(ASSETFS_PATH)
+	@gofmt -s -w $(ASSETFS_PATH)
 
 .PHONY: gen/doc
 gen/doc:
@@ -88,3 +92,10 @@ gen/doc:
 		-I=./vendor/proto/api-common-protos/ \
 		--doc_out=./doc --doc_opt=html,index.html \
 		./internal/server/proto/server.proto
+
+.PHONY: tools
+tools: # install dependencies and tools required to build
+	@echo "Fetching tools..."
+	$(GO_CMD) generate -tags tools tools/tools.go
+	@echo
+	@echo "Done!"

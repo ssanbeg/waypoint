@@ -117,7 +117,7 @@ the static binaries for your web service within your application image, and
 then executing the necessary commands to start ExpressJS to host those static files.
 
 See the [waypoint-examples](https://github.com/hashicorp/waypoint-examples)
-repository for more examples of this model.The `Procfile` syntax
+repository for more examples of this model. The `Procfile` syntax
 is `web: <server process> <server file>`. A sample Procfile with this syntax is below:
 
 ```bash
@@ -228,3 +228,75 @@ the locally built Docker image to the remote registry.
 Machine Images) are registered directly with Amazon and are never local
 artifacts. Therefore, a separate registry configuration is not required since
 the build/registry phases are one and the same.
+
+### Private Registries
+
+When using the docker plugin to push images to private container registries, the
+registry authentication may either be configured explicitly or "out of band"
+from Waypoint.
+
+#### Explicit Authentication
+
+Create a file with the registry authentication:
+
+```json
+{
+  “username”: “YOURUSERNAME”,
+  “password”: “YOURPASSWORD”,
+  “email”: "YOUREMAIL@EXAMPLE.COM”
+}
+```
+
+Reference the file in `waypoint.hcl`:
+
+```hcl
+...
+    build {
+        use "docker" {}
+          registry {
+            use "docker" {
+              image = "registry.example.com/image"
+              tag = "latest"
+              encoded_auth = filebase64("/path/to/dockerAuth.json")
+            }
+          }
+        }
+    }
+...
+```
+
+#### Out of Band Authentication
+
+Waypoint invokes Docker APIs, so if you have authentication configured with
+`docker login` or similar, then Waypoint does not need to authenticate directly
+to the private registry. Here is an example:
+
+```shell
+cat /path/to/mysecret | docker login registry.example.com -u USERNAME --password-stdin
+```
+
+where `/path/to/mysecret` is a file with your secret as contents and `USERNAME`
+is replaced with your actual registry username. Therefore Waypoint does not need
+to know the private registry credentials since it invokes the Docker API, which
+is configured with the private registry credentials. Here is an example
+`waypoint.hcl` registry configuration when relying on Docker's authentication:
+
+```hcl
+...
+    build {
+        use "docker" {}
+        registry {
+          use "docker" {
+            image = "registry.example.com/image"
+            tag = "latest"
+          }
+        }
+    }
+...
+```
+
+#### Platforms and Private Registries
+
+Reference [Deploy Private Registry
+documentation](/docs/lifecycle/deploy#private-registries) for details on how to
+configure deployment for private registries.

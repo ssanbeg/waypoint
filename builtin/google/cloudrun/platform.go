@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"google.golang.org/api/iam/v1"
 	run "google.golang.org/api/run/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -67,6 +68,11 @@ func (p *Platform) Auth() error {
 	return nil
 }
 
+// DefaultReleaserFunc implements component.PlatformReleaser
+func (p *Platform) DefaultReleaserFunc() interface{} {
+	return func() *Releaser { return &Releaser{} }
+}
+
 func (p *Platform) ValidateAuth(
 	ctx context.Context,
 	log hclog.Logger,
@@ -114,10 +120,10 @@ func (p *Platform) ValidateAuth(
 		src.App,
 	)
 
-	st.Update("Testing IAM permissions...")
+	st.Update("Testing Cloud Run IAM permissions...")
 	result, err := client.TestIamPermissions(apiResource, &testReq).Do()
 	if err != nil {
-		st.Step(terminal.StatusError, "Error testing IAM permissions: "+err.Error())
+		st.Step(terminal.StatusError, "Error testing Cloud Run IAM permissions: "+err.Error())
 		return err
 	}
 
@@ -127,10 +133,48 @@ func (p *Platform) ValidateAuth(
 		return fmt.Errorf("incorrect IAM permissions, received %s", strings.Join(result.Permissions, ", "))
 	}
 
+	// Validate if user has access to the service account specified
+	if p.config.ServiceAccountName != "" {
+
+		iamAPIService, err := deployment.iamAPIService(ctx)
+		if err != nil {
+			ui.Output("Error constructing api client: "+err.Error(), terminal.WithErrorStyle())
+			return status.Errorf(codes.Aborted, err.Error())
+		}
+
+		client := iam.NewProjectsServiceAccountsService(iamAPIService)
+
+		expectedPermissions := []string{
+			"iam.serviceAccounts.actAs",
+		}
+
+		// We need to ensure that the service creator has Service Account User role.
+		testReq := iam.TestIamPermissionsRequest{
+			Permissions: expectedPermissions,
+		}
+
+		apiResource := fmt.Sprintf("projects/%s/serviceAccounts/%s",
+			p.config.Project,
+			p.config.ServiceAccountName,
+		)
+
+		st.Update("Testing IAM permissions on the supplied service account...")
+		result, err := client.TestIamPermissions(apiResource, &testReq).Do()
+		if err != nil {
+			st.Step(terminal.StatusError, "Error testing IAM permissions of the Service Account: "+err.Error())
+			return err
+		}
+
+		// If our resulting permissions do not equal our expected permissions, auth does not validate
+		if !reflect.DeepEqual(result.Permissions, expectedPermissions) {
+			st.Step(terminal.StatusError, "Incorrect IAM permissions on the Service Account, received "+strings.Join(result.Permissions, ", "))
+			return fmt.Errorf("Incorrect IAM permissions on the Service Account, received %s", strings.Join(result.Permissions, ", "))
+		}
+	}
 	return nil
 }
 
-// Deploy deploys an image to GCR.
+// Deploy deploys an image to Cloud Run.
 func (p *Platform) Deploy(
 	ctx context.Context,
 	log hclog.Logger,
@@ -156,7 +200,7 @@ func (p *Platform) Deploy(
 
 	// Validate that the Docker image is stored in a GCP registry
 	// It is not possible to deploy to Cloud Run using external container registries
-	err = validateImageName(img.Image, p.config.Project)
+	err = validateImageName(img.Image)
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
@@ -229,7 +273,7 @@ func (p *Platform) Deploy(
 	// it defaults to latest revision.
 	if len(service.Spec.Traffic) > 0 && service.Spec.Traffic[0].LatestRevision {
 		service.Spec.Traffic = []*run.TrafficTarget{
-			&run.TrafficTarget{
+			{
 				RevisionName: service.Status.LatestCreatedRevisionName,
 				Percent:      100,
 			},
@@ -261,7 +305,7 @@ func (p *Platform) Deploy(
 		},
 		Spec: &run.RevisionSpec{
 			Containers: []*run.Container{
-				&run.Container{
+				{
 					Image:     img.Name(),
 					Env:       env,
 					Resources: resources,
@@ -275,28 +319,26 @@ func (p *Platform) Deploy(
 		service.Spec.Template.Spec.Containers[0].Ports = []*run.ContainerPort{{ContainerPort: int64(p.config.Port)}}
 	}
 
-	if p.config.Capacity.MaxRequestsPerContainer > 0 {
-		service.Spec.Template.Spec.ContainerConcurrency = int64(p.config.Capacity.MaxRequestsPerContainer)
-	}
+	if p.config.Capacity != nil {
+		if p.config.Capacity.MaxRequestsPerContainer > 0 {
+			service.Spec.Template.Spec.ContainerConcurrency = int64(p.config.Capacity.MaxRequestsPerContainer)
+		}
 
-	if p.config.Capacity.Memory > 0 {
-		// Requires value expressed as Kubernetes Quantity
-		// (https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/apimachinery/pkg/api/resource/quantity.go)
-		resources.Limits["memory"] = fmt.Sprintf("%dMi", p.config.Capacity.Memory)
-	}
+		if p.config.Capacity.Memory > 0 {
+			// Requires value expressed as Kubernetes Quantity
+			// (https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/apimachinery/pkg/api/resource/quantity.go)
+			resources.Limits["memory"] = fmt.Sprintf("%dMi", p.config.Capacity.Memory)
+		}
 
-	if p.config.Capacity.CPUCount > 0 {
-		// Can only be 1 or 2
-		resources.Limits["cpu"] = fmt.Sprintf("%d", p.config.Capacity.CPUCount)
-	}
+		if p.config.Capacity.CPUCount > 0 {
+			// Can only be 1 or 2
+			resources.Limits["cpu"] = fmt.Sprintf("%d", p.config.Capacity.CPUCount)
+		}
 
-	if p.config.Capacity.RequestTimeout > 0 {
-		// Max value of 900
-		service.Spec.Template.Spec.TimeoutSeconds = int64(p.config.Capacity.RequestTimeout)
-	}
-
-	if p.config.AutoScaling.Max > 0 {
-		service.Spec.Template.Metadata.Annotations["autoscaling.knative.dev/maxScale"] = fmt.Sprintf("%d", p.config.AutoScaling.Max)
+		if p.config.Capacity.RequestTimeout > 0 {
+			// Max value of 900
+			service.Spec.Template.Spec.TimeoutSeconds = int64(p.config.Capacity.RequestTimeout)
+		}
 	}
 
 	if p.config.StaticEnvVars != nil {
@@ -307,12 +349,22 @@ func (p *Platform) Deploy(
 		service.Spec.Template.Spec.Containers[0].Env = env
 	}
 
-	/*
-		// Not yet implemented by Cloud Run
-		if p.config.AutoScaling.Min > 0 {
-			service.Spec.Template.Metadata.Annotations["autoscaling.knative.dev/minScale"] = fmt.Sprintf("%d", p.config.AutoScaling.Min)
+	if p.config.AutoScaling != nil {
+		if p.config.AutoScaling.Max > 0 {
+			service.Spec.Template.Metadata.Annotations["autoscaling.knative.dev/maxScale"] = fmt.Sprintf("%d", p.config.AutoScaling.Max)
 		}
-	*/
+
+		/*
+			// Not yet implemented by Cloud Run
+			if p.config.AutoScaling.Min > 0 {
+				service.Spec.Template.Metadata.Annotations["autoscaling.knative.dev/minScale"] = fmt.Sprintf("%d", p.config.AutoScaling.Min)
+			}
+		*/
+	}
+
+	if p.config.ServiceAccountName != "" {
+		service.Spec.Template.Spec.ServiceAccountName = p.config.ServiceAccountName
+	}
 
 	if create {
 		// Create the service
@@ -379,7 +431,7 @@ func (p *Platform) Destroy(
 }
 
 func (p *Platform) Documentation() (*docs.Documentation, error) {
-	doc, err := docs.New(docs.FromConfig(&Config{}))
+	doc, err := docs.New(docs.FromConfig(&Config{}), docs.FromFunc(p.DeployFunc()))
 	if err != nil {
 		return nil, err
 	}
@@ -423,6 +475,8 @@ app "wpmini" {
         max_requests_per_container = 10
         request_timeout            = 300
       }
+
+	  service_account_name = "cloudrun@waypoint-project-id.iam.gserviceaccount.com"
 
       auto_scaling {
         max = 10
@@ -496,6 +550,11 @@ app "wpmini" {
 	)
 
 	doc.SetField(
+		"service_account_name",
+		"Specify a service account email that Cloud Run will use to run the service. You must have the `iam.serviceAccounts.actAs` permission on the service account.",
+	)
+
+	doc.SetField(
 		"auto_scaling.max",
 		`Maximum number of Cloud Run instances. When the maximum requests per container is exceeded, Cloud Run will create an additional container instance to handle load.
 		This parameter controls the maximum number of instances that can be created.`,
@@ -534,6 +593,9 @@ type Config struct {
 
 	// AutoScaling details.
 	AutoScaling *AutoScaling `hcl:"auto_scaling,block"`
+
+	// Service Account details
+	ServiceAccountName string `hcl:"service_account_name,optional"`
 }
 
 // Capacity defines configuration for deployed Cloud Run resources

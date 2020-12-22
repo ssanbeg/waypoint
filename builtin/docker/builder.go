@@ -3,8 +3,11 @@ package docker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/docker/cli/cli/command/image/build"
 	"github.com/docker/docker/api/types"
@@ -15,10 +18,13 @@ import (
 	"github.com/hashicorp/waypoint-plugin-sdk/component"
 	"github.com/hashicorp/waypoint-plugin-sdk/docs"
 	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
-	"github.com/hashicorp/waypoint/internal/assets"
-	"github.com/hashicorp/waypoint/internal/pkg/epinject"
+	"github.com/oklog/ulid/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	wpdockerclient "github.com/hashicorp/waypoint/builtin/docker/client"
+	"github.com/hashicorp/waypoint/internal/assets"
+	"github.com/hashicorp/waypoint/internal/pkg/epinject"
 )
 
 // Builder uses `docker build` to build a Docker iamge.
@@ -38,10 +44,16 @@ type BuilderConfig struct {
 
 	// Controls whether or not the image should be build with buildkit or docker v1
 	UseBuildKit bool `hcl:"buildkit,optional"`
+
+	// The name/path to the Dockerfile if it is not the root of the project
+	Dockerfile string `hcl:"dockerfile,optional"`
 }
 
 func (b *Builder) Documentation() (*docs.Documentation, error) {
-	doc, err := docs.New(docs.FromConfig(&BuilderConfig{}))
+	doc, err := docs.New(
+		docs.FromConfig(&BuilderConfig{}),
+		docs.FromFunc(b.BuildFunc()),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +69,6 @@ build {
 }
 `)
 
-	doc.Input("component.Source")
 	doc.Output("docker.Image")
 
 	doc.SetField(
@@ -73,6 +84,14 @@ build {
 	doc.SetField(
 		"buildkit",
 		"if set, use the buildkit builder from Docker",
+	)
+
+	doc.SetField(
+		"dockerfile",
+		"The path to the Dockerfile.",
+		docs.Summary(
+			"Set this when the Dockerfile is not APP-PATH/Dockerfile",
+		),
 	)
 
 	return doc, nil
@@ -103,14 +122,40 @@ func (b *Builder) Build(
 		Tag:   "latest",
 	}
 
-	cli, err := client.NewClientWithOpts(client.FromEnv)
+	cli, err := wpdockerclient.NewClientWithOpts(client.FromEnv)
 	if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "unable to create Docker client: %s", err)
 	}
 
 	cli.NegotiateAPIVersion(ctx)
 
-	contextDir, relDockerfile, err := build.GetContextFromLocalDir(src.Path, "")
+	dockerfile := b.config.Dockerfile
+	if dockerfile == "" {
+		dockerfile = "Dockerfile"
+	}
+	if !filepath.IsAbs(dockerfile) {
+		dockerfile = filepath.Join(src.Path, dockerfile)
+	}
+
+	// If the dockerfile is outside of our build context, then we copy it
+	// into our build context.
+	relDockerfile, err := filepath.Rel(src.Path, dockerfile)
+	if err != nil || strings.HasPrefix(relDockerfile, "..") {
+		id, err := ulid.New(ulid.Now(), rand.Reader)
+		if err != nil {
+			return nil, err
+		}
+
+		newPath := filepath.Join(src.Path, fmt.Sprintf("Dockerfile-%s", id.String()))
+		if err := copyFile(dockerfile, newPath); err != nil {
+			return nil, err
+		}
+		defer os.Remove(newPath)
+
+		dockerfile = newPath
+	}
+
+	contextDir, relDockerfile, err := build.GetContextFromLocalDir(src.Path, dockerfile)
 	if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "unable to create Docker context: %s", err)
 	}
@@ -149,6 +194,7 @@ func (b *Builder) Build(
 		Version:    ver,
 		Dockerfile: relDockerfile,
 		Tags:       []string{result.Name()},
+		Remove:     true,
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "error building image: %s", err)
@@ -184,7 +230,7 @@ func (b *Builder) Build(
 			ep := &epinject.NewEntrypoint{
 				Entrypoint: append([]string{"/waypoint-entrypoint"}, cur...),
 				InjectFiles: map[string]epinject.InjectFile{
-					"/waypoint-entrypoint": epinject.InjectFile{
+					"/waypoint-entrypoint": {
 						Reader: bytes.NewReader(asset),
 						Info:   assetInfo,
 					},

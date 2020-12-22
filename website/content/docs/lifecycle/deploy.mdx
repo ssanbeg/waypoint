@@ -40,7 +40,7 @@ app "my-app" {
 To deploy your app with Waypoint, you will need to select which platform to use.
 A deployment platform is a runtime for your app. It could be a container runtime
 capable of running a docker image or it could be a virtual machine platform.
-The deployment platform must be compatible with the app artifact output format from [build](/docs/lifecycle/).
+The deployment platform must be compatible with the app artifact output format from [build](/docs/lifecycle/build).
 
 You can currently use Waypoint to deploy your app to any of these platforms.
 
@@ -52,7 +52,7 @@ You can currently use Waypoint to deploy your app to any of these platforms.
 - [Azure Container Instances](/plugins/azure-container-instance)
 - [Netlify](/plugins/netlify)
 
-~> You may use the Kuberenetes plugin to target any Kubernetes instance. For example, AWS EKS, Azure AKS, Google GKE, and Kuberenetes for Docker Desktop.
+~> You may use the Kubernetes plugin to target any Kubernetes instance. For example, AWS EKS, Azure AKS, Google GKE, and Kubernetes for Docker Desktop.
 
 #### How to Add a Deployment Platform to Waypoint
 
@@ -61,7 +61,7 @@ You can also create a [plugin](/plugins) to extend Waypoint with your own deploy
 ## Automatic Release
 
 By default, `waypoint deploy` automatically performs a
-[release](/docs/lifecycle/deploy).
+[release](/docs/lifecycle/release).
 
 This is because this is often the most expected behavior of a deploy
 since traditionally deploy and release were inseparable. We consider
@@ -78,3 +78,45 @@ $ waypoint deploy -release=false
 
 -> A future Waypoint version will allow this to be disabled in the project
 configuration file.
+
+## Private Registries
+
+Deployment platforms that pull an app container image
+from a private registry need configuration to authenticate
+to a private registry.
+
+### Kubernetes with a Private Registry
+
+For Kubernetes, reference [authenticate to private container registries
+with a kubernetes
+secret](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/).
+If you named the secret `example-registry-secret`, then you can [reference the
+secret in
+Waypoint](https://www.waypointproject.io/plugins/kubernetes#image_secret) like:
+
+```hcl
+...
+  deploy {
+    use "kubernetes" {
+      image_secret = "example-registry-secret"
+    }
+  }
+...
+```
+
+### Docker with a Private Registry
+
+When deploying to Docker with a private image, Waypoint will [use authentication
+from the registry stanza](/docs/lifecycle/build#private-registries) or "out
+of band" Docker authentication configured directly with Docker.
+
+### Nomad with a Private Registry
+
+The Waypoint Nomad plugin does not currently support [configuring the `auth`
+stanza](https://www.nomadproject.io/docs/drivers/docker#authentication) in the
+Nomad task configuration.
+
+### Other Platforms with a Private Registry
+
+Platform plugins such as AWS ECS, Azure ACI, and GCP Cloud Run often inherently
+support private registries.

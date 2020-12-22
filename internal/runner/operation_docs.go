@@ -5,9 +5,9 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/hashicorp/waypoint-plugin-sdk/component"
 	"github.com/hashicorp/waypoint/internal/core"
 	pb "github.com/hashicorp/waypoint/internal/server/gen"
-	"github.com/hashicorp/waypoint-plugin-sdk/component"
 )
 
 func (r *Runner) executeDocsOp(
@@ -28,10 +28,17 @@ func (r *Runner) executeDocsOp(
 		return nil, err
 	}
 
-	var results []*pb.Job_DocsResult_Result
+	cs, err := app.Components(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range cs {
+		defer c.Close()
+	}
 
-	for _, c := range app.Components() {
-		info := app.ComponentProto(c)
+	var results []*pb.Job_DocsResult_Result
+	for _, c := range cs {
+		info := c.Info
 		if info == nil {
 			// Should never happen
 			continue

@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 	"github.com/hashicorp/waypoint/internal/cli/datagen"
 	clientpkg "github.com/hashicorp/waypoint/internal/client"
 	"github.com/hashicorp/waypoint/internal/clierrors"
@@ -21,7 +22,6 @@ import (
 	"github.com/hashicorp/waypoint/internal/pkg/flag"
 	pb "github.com/hashicorp/waypoint/internal/server/gen"
 	serverptypes "github.com/hashicorp/waypoint/internal/server/ptypes"
-	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 )
 
 type InitCommand struct {
@@ -151,11 +151,13 @@ func (c *InitCommand) Run(args []string) int {
 		c.validateServer,
 		c.validateProject,
 		c.validatePlugins,
-		c.validateAuth,
+		// NOTE(mitchellh): this is disabled as of 0.2 since we can't load
+		// config anymore. We're keeping the code around so that we can migrate
+		// it in the future.
+		// c.validateAuth,
 	}
 	for _, step := range steps {
 		if !step() {
-			c.ui.Output("")
 			c.ui.Output("Project had errors during initialization.\n"+
 				"Waypoint experienced some errors during project initialization. The output\n"+
 				"above should contain the failure messages. Please correct these errors and\n"+
@@ -293,7 +295,7 @@ func (c *InitCommand) validateProject() bool {
 			}
 
 			source := factory()
-			ds, err = source.ProjectSource(dscfg.Body, c.cfgCtx)
+			ds, err = source.ProjectSource(dscfg.Body, c.cfg.HCLContext())
 			if err != nil {
 				c.stepError(s, initStepProject, err)
 				return false
@@ -317,18 +319,18 @@ func (c *InitCommand) validateProject() bool {
 	}
 
 	pt := &serverptypes.Project{Project: project}
-	for _, app := range c.cfg.Apps {
-		if pt.App(app.Name) >= 0 {
+	for _, name := range c.cfg.Apps() {
+		if pt.App(name) >= 0 {
 			continue
 		}
 
 		// Missing an application, register it.
 		s.Status(terminal.StatusWarn)
-		s.Update("Application %q is not registered with the server. Registering...", app.Name)
+		s.Update("Application %q is not registered with the server. Registering...", name)
 
 		_, err := client.UpsertApplication(c.Ctx, &pb.UpsertApplicationRequest{
 			Project: ref,
-			Name:    app.Name,
+			Name:    name,
 		})
 		if err != nil {
 			c.stepError(s, initStepProject, err)
@@ -368,8 +370,8 @@ func (c *InitCommand) validateAuth() bool {
 	s := sg.Add("Checking auth for the configured components...")
 
 	failures := false
-	for _, appcfg := range c.cfg.Apps {
-		app := c.project.App(appcfg.Name)
+	for _, name := range c.cfg.Apps() {
+		app := c.project.App(name)
 
 		ref := app.Ref()
 		s.Update("Checking auth for app: %q", ref.Application)

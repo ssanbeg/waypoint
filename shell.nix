@@ -1,22 +1,8 @@
-{ pkgsPath ? <nixpkgs> }:
-
 let
   # First we setup our overlays. These are overrides of the official nix packages.
   # We do this to pin the versions we want to use of the software that is in
   # the official nixpkgs repo.
-  pkgs = import pkgsPath {
-    overlays = [(self: super: {
-
-      go = super.go_1_14.overrideAttrs ( old: rec {
-        version = "1.14.5";
-        src = super.fetchurl {
-          url = "https://dl.google.com/go/go${version}.src.tar.gz";
-          sha256 = "0p1i80j3dk597ph5h6mvvv8p7rbzwmxdfb6558amcpkkj060hk6a";
-        };
-      });
-
-    })];
-  };
+  pkgs = import ./nix;
 in with pkgs; let
   go-protobuf = buildGoModule rec {
     pname = "go-protobuf";
@@ -78,6 +64,11 @@ in with pkgs; let
       sha256 = "16yqhr92n5s0svk31yy3k42764fas694mnqqcny633yi0wqb876a";
     };
 
+    buildFlagsArray = ''
+      -ldflags=
+      -s -w -X github.com/vektra/mockery/mockery.SemVer=${version}
+    '';
+
     modSha256 = "0wyzfmhk7plazadbi26rzq3w9cmvqz2dd5jsl6kamw53ps5yh536";
     vendorSha256 = "0fai4hs3q822dg36a2zrxb191f71xdpafapn6ymi1w9dx68navcb";
 
@@ -88,8 +79,10 @@ in pkgs.mkShell rec {
 
   # The packages in the `buildInputs` list will be added to the PATH in our shell
   buildInputs = [
+    pkgs.docker-compose
     pkgs.go
     pkgs.go-bindata
+    pkgs.niv
     pkgs.nodejs-12_x
     pkgs.protobuf3_11
     pkgs.postgresql_12
@@ -97,7 +90,10 @@ in pkgs.mkShell rec {
     go-protobuf-json
     go-tools
     go-mockery
-  ];
+  ] ++ (with pkgs; [
+    # Needed for website/
+    pkgconfig autoconf automake libtool nasm autogen zlib libpng
+  ]);
 
   # Extra env vars
   PGHOST = "localhost";

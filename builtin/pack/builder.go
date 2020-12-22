@@ -8,13 +8,16 @@ import (
 
 	"github.com/buildpacks/pack"
 	"github.com/buildpacks/pack/logging"
+	"github.com/docker/docker/client"
 	"github.com/hashicorp/waypoint-plugin-sdk/component"
 	"github.com/hashicorp/waypoint-plugin-sdk/docs"
 	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
-	"github.com/hashicorp/waypoint/internal/assets"
-	"github.com/hashicorp/waypoint/internal/pkg/epinject"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	wpdockerclient "github.com/hashicorp/waypoint/builtin/docker/client"
+	"github.com/hashicorp/waypoint/internal/assets"
+	"github.com/hashicorp/waypoint/internal/pkg/epinject"
 )
 
 // Builder uses `pack` -- the frontend for CloudNative Buildpacks -- to build
@@ -35,6 +38,12 @@ type BuilderConfig struct {
 
 	// The Buildpack builder image to use, defaults to the standard heroku one.
 	Builder string `hcl:"builder,optional"`
+
+	// Environment variables that are meant to configure the application in a static
+	// way. This might be control an image that has mulitple modes of operation,
+	// selected via environment variable. Most configuration should use the waypoint
+	// config commands.
+	StaticEnvVars map[string]string `hcl:"static_environment,optional"`
 }
 
 const DefaultBuilder = "heroku/buildpacks:18"
@@ -72,7 +81,23 @@ func (b *Builder) Build(
 
 	log := logging.New(build.TermOutput())
 
-	client, err := pack.NewClient(pack.WithLogger(log))
+	dockerClient, err := wpdockerclient.NewClientWithOpts(
+		client.FromEnv,
+		// If we don't specify a version, the client will use too new an API, and users
+		// will get and error of the form shown below. Note that when you don't pass a
+		// client 'pack' does the same thing we're doing here:
+		//
+		// client version X.XX is too new. Maximum supported API
+		client.WithVersion("1.38"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := pack.NewClient(
+		pack.WithLogger(log),
+		pack.WithDockerClient(dockerClient),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +108,7 @@ func (b *Builder) Build(
 		Image:   src.App,
 		Builder: builder,
 		AppPath: src.Path,
+		Env:     b.config.StaticEnvVars,
 		FileFilter: func(file string) bool {
 			// Do not include the bolt.db or bolt.db.lock
 			// These files hold the local state when Waypoint is running without a server
@@ -166,7 +192,7 @@ func (b *Builder) Build(
 			ep := &epinject.NewEntrypoint{
 				Entrypoint: append([]string{"/waypoint-entrypoint"}, cur...),
 				InjectFiles: map[string]epinject.InjectFile{
-					"/waypoint-entrypoint": epinject.InjectFile{
+					"/waypoint-entrypoint": {
 						Reader: bytes.NewReader(asset),
 						Info:   assetInfo,
 					},
@@ -200,7 +226,7 @@ func (b *Builder) Build(
 }
 
 func (b *Builder) Documentation() (*docs.Documentation, error) {
-	doc, err := docs.New(docs.FromConfig(&BuilderConfig{}))
+	doc, err := docs.New(docs.FromConfig(&BuilderConfig{}), docs.FromFunc(b.BuildFunc()))
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +264,17 @@ build {
 		"builder",
 		"The buildpack builder image to use",
 		docs.Default(DefaultBuilder),
+	)
+
+	doc.SetField(
+		"static_environment",
+		"environment variables to expose to the buildpack",
+		docs.Summary(
+			"these environment variables should not be run of the mill",
+			"configuration variables, use waypoint config for that.",
+			"These variables are used to control over all container modes,",
+			"such as configuring it to start a web app vs a background worker",
+		),
 	)
 
 	return doc, nil

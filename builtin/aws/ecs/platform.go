@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/waypoint-plugin-sdk/component"
 	"github.com/hashicorp/waypoint-plugin-sdk/docs"
 	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
+	"github.com/hashicorp/waypoint/builtin/aws/utils"
 	"github.com/hashicorp/waypoint/builtin/docker"
 )
 
@@ -202,7 +203,7 @@ func (p *Platform) Deploy(
 		sess *session.Session
 		dep  *Deployment
 
-		role, cluster, logGroup string
+		executionRole, taskRole, cluster, logGroup string
 
 		err error
 	)
@@ -219,18 +220,33 @@ func (p *Platform) Deploy(
 		}
 	}
 
+	if p.config.ServicePort == 0 {
+		p.config.ServicePort = 3000
+	}
+
 	lf := &Lifecycle{
 		Init: func(s LifecycleStatus) error {
-			sess = session.New(aws.NewConfig().WithRegion(p.config.Region))
-
+			sess, err = utils.GetSession(&utils.SessionConfig{
+				Region: p.config.Region,
+			})
+			if err != nil {
+				return err
+			}
 			cluster, err = p.SetupCluster(ctx, s, sess)
 			if err != nil {
 				return err
 			}
 
-			role, err = p.SetupRole(ctx, s, log, sess, src)
+			executionRole, err = p.SetupExecutionRole(ctx, s, log, sess, src)
 			if err != nil {
 				return err
+			}
+
+			if p.config.TaskRoleName != "" {
+				taskRole, err = p.SetupTaskRole(ctx, s, log, sess, src)
+				if err != nil {
+					return err
+				}
 			}
 
 			logGroup, err = p.SetupLogs(ctx, s, log, sess)
@@ -242,7 +258,7 @@ func (p *Platform) Deploy(
 		},
 
 		Run: func(s LifecycleStatus) error {
-			dep, err = p.Launch(ctx, s, log, ui, sess, src, img, deployConfig, role, cluster, logGroup)
+			dep, err = p.Launch(ctx, s, log, ui, sess, src, img, deployConfig, executionRole, taskRole, cluster, logGroup)
 			return err
 		},
 
@@ -297,9 +313,11 @@ func (p *Platform) SetupCluster(ctx context.Context, s LifecycleStatus, sess *se
 		return "", err
 	}
 
-	if len(desc.Clusters) > 1 {
-		s.Status("Found existing ECS cluster: %s", cluster)
-		return cluster, nil
+	for _, c := range desc.Clusters {
+		if *c.ClusterName == cluster && strings.ToLower(*c.Status) == "active" {
+			s.Status("Found existing ECS cluster: %s", cluster)
+			return cluster, nil
+		}
 	}
 
 	if p.config.EC2Cluster {
@@ -356,13 +374,39 @@ func init() {
 	}
 }
 
-func (p *Platform) SetupRole(ctx context.Context, s LifecycleStatus, L hclog.Logger, sess *session.Session, app *component.Source) (string, error) {
+func (p *Platform) SetupTaskRole(ctx context.Context, s LifecycleStatus, L hclog.Logger, sess *session.Session, app *component.Source) (string, error) {
 	svc := iam.New(sess)
 
-	roleName := p.config.RoleName
+	roleName := p.config.TaskRoleName
+
+	L.Debug("attempting to retrieve existing role", "role-name", roleName)
+
+	queryInput := &iam.GetRoleInput{
+		RoleName: aws.String(roleName),
+	}
+
+	getOut, err := svc.GetRole(queryInput)
+	if err != nil {
+		s.Status("IAM role not found: %s", roleName)
+		return "", err
+	}
+
+	s.Status("Found task IAM role to use: %s", roleName)
+	return *getOut.Role.Arn, nil
+}
+
+func (p *Platform) SetupExecutionRole(ctx context.Context, s LifecycleStatus, L hclog.Logger, sess *session.Session, app *component.Source) (string, error) {
+	svc := iam.New(sess)
+
+	roleName := p.config.ExecutionRoleName
 
 	if roleName == "" {
 		roleName = "ecr-" + app.App
+	}
+
+	// role names have to be 64 characters or less, and the client side doesn't validate this.
+	if len(roleName) > 64 {
+		roleName = roleName[:64]
 	}
 
 	// p.updateStatus("setting up IAM role")
@@ -379,7 +423,7 @@ func (p *Platform) SetupRole(ctx context.Context, s LifecycleStatus, L hclog.Log
 	}
 
 	L.Debug("creating new role")
-	s.Status("Creating IAM role: %s (%s)", roleName)
+	s.Status("Creating IAM role: %s", roleName)
 
 	input := &iam.CreateRoleInput{
 		AssumeRolePolicyDocument: aws.String(rolePolicy),
@@ -529,7 +573,7 @@ func (p *Platform) Launch(
 	app *component.Source,
 	img *docker.Image,
 	deployConfig *component.DeploymentConfig,
-	roleArn, clusterName, logGroup string,
+	executionRoleArn, taskRoleArn, clusterName, logGroup string,
 ) (*Deployment, error) {
 	id, err := component.Id()
 	if err != nil {
@@ -543,8 +587,23 @@ func (p *Platform) Launch(
 	env := []*ecs.KeyValuePair{
 		{
 			Name:  aws.String("PORT"),
-			Value: aws.String("3000"),
+			Value: aws.String(fmt.Sprint(p.config.ServicePort)),
 		},
+	}
+
+	for k, v := range p.config.Environment {
+		env = append(env, &ecs.KeyValuePair{
+			Name:  aws.String(k),
+			Value: aws.String(v),
+		})
+	}
+
+	var secrets []*ecs.Secret
+	for k, v := range p.config.Secrets {
+		secrets = append(secrets, &ecs.Secret{
+			Name:      aws.String(k),
+			ValueFrom: aws.String(v),
+		})
 	}
 
 	for k, v := range deployConfig.Env() {
@@ -560,10 +619,11 @@ func (p *Platform) Launch(
 		Image:     aws.String(img.Name()),
 		PortMappings: []*ecs.PortMapping{
 			{
-				ContainerPort: aws.Int64(3000),
+				ContainerPort: aws.Int64(p.config.ServicePort),
 			},
 		},
 		Environment: env,
+		Secrets:     secrets,
 		LogConfiguration: &ecs.LogConfiguration{
 			LogDriver: aws.String("awslogs"),
 			Options: map[string]*string{
@@ -574,13 +634,57 @@ func (p *Platform) Launch(
 		},
 	}
 
-	L.Debug("registring task definition", "id", id)
+	var additionalContainers []*ecs.ContainerDefinition
+	for _, container := range p.config.ContainersConfig {
+		var secrets []*ecs.Secret
+		for k, v := range container.Secrets {
+			secrets = append(secrets, &ecs.Secret{
+				Name:      aws.String(k),
+				ValueFrom: aws.String(v),
+			})
+		}
+
+		var env []*ecs.KeyValuePair
+		for k, v := range container.Environment {
+			env = append(env, &ecs.KeyValuePair{
+				Name:  aws.String(k),
+				Value: aws.String(v),
+			})
+		}
+
+		c := &ecs.ContainerDefinition{
+			Essential: aws.Bool(false),
+			Name:      aws.String(container.Name),
+			Image:     aws.String(container.Image),
+			PortMappings: []*ecs.PortMapping{
+				{
+					ContainerPort: aws.Int64(container.ContainerPort),
+					HostPort:      aws.Int64(container.HostPort),
+					Protocol:      aws.String(container.Protocol),
+				},
+			},
+			HealthCheck: &ecs.HealthCheck{
+				Command:     aws.StringSlice(container.HealthCheck.Command),
+				Interval:    aws.Int64(container.HealthCheck.Interval),
+				Timeout:     aws.Int64(container.HealthCheck.Timeout),
+				Retries:     aws.Int64(container.HealthCheck.Retries),
+				StartPeriod: aws.Int64(container.HealthCheck.StartPeriod),
+			},
+			Secrets:     secrets,
+			Environment: env,
+		}
+
+		additionalContainers = append(additionalContainers, c)
+	}
+
+	L.Debug("registering task definition", "id", id)
 
 	var cpuShares int
 
 	runtime := aws.String("FARGATE")
 	if p.config.EC2Cluster {
 		runtime = aws.String("EC2")
+		cpuShares = p.config.CPU
 	} else {
 		if p.config.Memory == 0 {
 			return nil, fmt.Errorf("Memory value required for fargate")
@@ -631,18 +735,24 @@ func (p *Platform) Launch(
 		}
 	}
 
-	cpus := strconv.Itoa(cpuShares)
+	cpus := aws.String(strconv.Itoa(cpuShares))
+	// on EC2 launch type, `Cpu` is an optional field, so we leave it nil if it is 0
+	if p.config.EC2Cluster && cpuShares == 0 {
+		cpus = nil
+	}
 	mems := strconv.Itoa(p.config.Memory)
 
 	family := "waypoint-" + app.App
 
 	s.Status("Registering Task definition: %s", family)
 
-	taskOut, err := ecsSvc.RegisterTaskDefinition(&ecs.RegisterTaskDefinitionInput{
-		ContainerDefinitions: []*ecs.ContainerDefinition{&def},
+	containerDefinitions := append([]*ecs.ContainerDefinition{&def}, additionalContainers...)
 
-		ExecutionRoleArn: aws.String(roleArn),
-		Cpu:              aws.String(cpus),
+	registerTaskDefinitionInput := ecs.RegisterTaskDefinitionInput{
+		ContainerDefinitions: containerDefinitions,
+
+		ExecutionRoleArn: aws.String(executionRoleArn),
+		Cpu:              cpus,
 		Memory:           aws.String(mems),
 		Family:           aws.String(family),
 
@@ -655,21 +765,31 @@ func (p *Platform) Launch(
 				Value: aws.String(app.App),
 			},
 		},
-	})
+	}
+
+	if taskRoleArn != "" {
+		registerTaskDefinitionInput.SetTaskRoleArn(taskRoleArn)
+	}
+
+	taskOut, err := ecsSvc.RegisterTaskDefinition(&registerTaskDefinitionInput)
 
 	if err != nil {
 		return nil, err
 	}
 
 	s.Update("Registered Task definition: %s", family)
-	rand := id[len(id)-(31-len(app.App)):]
 
-	serviceName := fmt.Sprintf("%s-%s", app.App, rand)
+	serviceName := fmt.Sprintf("%s-%s", app.App, id)
+
+	// We have to clamp at a length of 32 because the Name field to CreateTargetGroup
+	// requires that the name is 32 characters or less.
+	if len(serviceName) > 32 {
+		serviceName = serviceName[:32]
+	}
 
 	taskArn := *taskOut.TaskDefinition.TaskDefinitionArn
 
 	var subnets []*string
-
 	if len(p.config.Subnets) == 0 {
 		s.Update("Using default subnets for Service networking")
 		subnets, err = defaultSubnets(ctx, sess)
@@ -677,6 +797,7 @@ func (p *Platform) Launch(
 			return nil, err
 		}
 	} else {
+		subnets = make([]*string, len(p.config.Subnets))
 		for i := range p.config.Subnets {
 			subnets[i] = &p.config.Subnets[i]
 		}
@@ -700,7 +821,7 @@ func (p *Platform) Launch(
 	ctg, err := elbsrv.CreateTargetGroup(&elbv2.CreateTargetGroupInput{
 		HealthCheckEnabled: aws.Bool(true),
 		Name:               aws.String(serviceName),
-		Port:               aws.Int64(3000),
+		Port:               aws.Int64(p.config.ServicePort),
 		Protocol:           aws.String("HTTP"),
 		TargetType:         aws.String("ip"),
 		VpcId:              vpcId,
@@ -768,6 +889,12 @@ func (p *Platform) Launch(
 			*listener.ListenerArn, *listener.LoadBalancerArn)
 	} else {
 		lbName := "waypoint-ecs-" + app.App
+
+		// Names have to be 32 characters or less, so clamp it here.
+		if len(lbName) > 32 {
+			lbName = lbName[:32]
+		}
+
 		dlb, err := elbsrv.DescribeLoadBalancers(&elbv2.DescribeLoadBalancersInput{
 			Names: []*string{&lbName},
 		})
@@ -863,7 +990,7 @@ func (p *Platform) Launch(
 			tgs[0].Weight = aws.Int64(100)
 		}
 
-		s.Update("Modifing ALB Listener to introduce target group")
+		s.Update("Modifying ALB Listener to introduce target group")
 
 		_, err = elbsrv.ModifyListener(&elbv2.ModifyListenerInput{
 			ListenerArn:  listener.ListenerArn,
@@ -948,7 +1075,7 @@ func (p *Platform) Launch(
 	// Create the service
 
 	L.Debug("creating service", "arn", *taskOut.TaskDefinition.TaskDefinitionArn)
-	sg3000, err := createSG(ctx, s, sess, fmt.Sprintf("%s-inbound-internal", app.App), vpcId, 3000)
+	sgecsport, err := createSG(ctx, s, sess, fmt.Sprintf("%s-inbound-internal", app.App), vpcId, int(p.config.ServicePort))
 	if err != nil {
 		return nil, err
 	}
@@ -960,10 +1087,12 @@ func (p *Platform) Launch(
 
 	netCfg := &ecs.AwsVpcConfiguration{
 		Subnets:        subnets,
-		SecurityGroups: []*string{sg3000},
+		SecurityGroups: []*string{sgecsport},
 	}
 
-	netCfg.AssignPublicIp = aws.String("ENABLED")
+	if !p.config.EC2Cluster {
+		netCfg.AssignPublicIp = aws.String("ENABLED")
+	}
 
 	s.Status("Creating ECS Service (%s, cluster-name: %s)", serviceName, clusterName)
 	servOut, err := ecsSvc.CreateService(&ecs.CreateServiceInput{
@@ -978,7 +1107,7 @@ func (p *Platform) Launch(
 		LoadBalancers: []*ecs.LoadBalancer{
 			{
 				ContainerName:  aws.String(app.App),
-				ContainerPort:  aws.Int64(3000),
+				ContainerPort:  aws.Int64(p.config.ServicePort),
 				TargetGroupArn: tgArn,
 			},
 		},
@@ -1010,8 +1139,15 @@ func (p *Platform) Destroy(
 ) error {
 	log.Debug("removing deployment target group from load balancer")
 
-	sess := session.New(aws.NewConfig().WithRegion(p.config.Region))
+	sess, err := utils.GetSession(&utils.SessionConfig{
+		Region: p.config.Region,
+	})
+	if err != nil {
+		return err
+	}
 	elbsrv := elbv2.New(sess)
+
+	log.Debug("load balancer arn", "arn", deployment.LoadBalancerArn)
 
 	listeners, err := elbsrv.DescribeListeners(&elbv2.DescribeListenersInput{
 		LoadBalancerArn: &deployment.LoadBalancerArn,
@@ -1025,11 +1161,24 @@ func (p *Platform) Destroy(
 	if len(listeners.Listeners) > 0 {
 		listener = listeners.Listeners[0]
 
+		log.Debug("listener arn", "arn", *listener.ListenerArn)
+
 		def := listener.DefaultActions
 
 		var tgs []*elbv2.TargetGroupTuple
 
-		if len(def) > 0 && def[0].ForwardConfig != nil {
+		// If there is only 1 target group, delete the listener
+		if len(def) == 1 {
+			log.Debug("only 1 target group, deleting listener")
+			_, err = elbsrv.DeleteListener(&elbv2.DeleteListenerInput{
+				ListenerArn: listener.ListenerArn,
+			})
+
+			if err != nil {
+				return err
+			}
+		} else if len(def) > 1 && def[0].ForwardConfig != nil {
+			// Multiple target groups means we can keep the listener
 			var active bool
 
 			for _, tg := range def[0].ForwardConfig.TargetGroups {
@@ -1107,6 +1256,55 @@ type ALBConfig struct {
 	ListenerARN string `hcl:"listener_arn,optional"`
 }
 
+type HealthCheckConfig struct {
+	// A string array representing the command that the container runs to determine if it is healthy
+	Command []string `hcl:"command"`
+
+	// The time period in seconds between each health check execution
+	Interval int64 `hcl:"interval,optional"`
+
+	// The time period in seconds to wait for a health check to succeed before it is considered a failure
+	Timeout int64 `hcl:"timeout,optional"`
+
+	// The number of times to retry a failed health check before the container is considered unhealthy
+	Retries int64 `hcl:"retries,optional"`
+
+	// The optional grace period within which to provide containers time to bootstrap before failed health checks count towards the maximum number of retries
+	StartPeriod int64 `hcl:"start_period,optional"`
+}
+
+type ContainerConfig struct {
+	// The name of a container
+	Name string `hcl:"name"`
+
+	// The image used to start a container
+	Image string `hcl:"image"`
+
+	// The amount (in MiB) of memory to present to the container
+	Memory string `hcl:"memory,optional"`
+
+	// The soft limit (in MiB) of memory to reserve for the container
+	MemoryReservation string `hcl:"memory_reservation,optional"`
+
+	// The port number on the container
+	ContainerPort int64 `hcl:"container_port,optional"`
+
+	// The port number on the container instance to reserve for your container
+	HostPort int64 `hcl:"host_port,optional"`
+
+	// The protocol used for the port mapping
+	Protocol string `hcl:"protocol,optional"`
+
+	// The container health check command
+	HealthCheck *HealthCheckConfig `hcl:"health_check,block"`
+
+	// The environment variables to pass to a container
+	Environment map[string]string `hcl:"static_environment,optional"`
+
+	// The secrets to pass to a container
+	Secrets map[string]string `hcl:"secrets,optional"`
+}
+
 type Config struct {
 	// AWS Region to deploy into
 	Region string `hcl:"region"`
@@ -1117,8 +1315,11 @@ type Config struct {
 	// Name of the ECS cluster to install the service into
 	Cluster string `hcl:"cluster,optional"`
 
-	// Name of the IAM Role to associate with the ECS Service
-	RoleName string `hcl:"role_name,optional"`
+	// Name of the execution task IAM Role to associate with the ECS Service
+	ExecutionRoleName string `hcl:"execution_role_name,optional"`
+
+	// Name of the task IAM role to associate with the ECS service
+	TaskRoleName string `hcl:"task_role_name,optional"`
 
 	// Subnets to place the service into. Defaults to the subnets in the default VPC.
 	Subnets []string `hcl:"subnets,optional"`
@@ -1132,21 +1333,34 @@ type Config struct {
 	// How much CPU to assign to the containers
 	CPU int `hcl:"cpu,optional"`
 
+	// The environment variables to pass to the main container
+	Environment map[string]string `hcl:"static_environment,optional"`
+
+	// The secrets to pass to to the main container
+	Secrets map[string]string `hcl:"secrets,optional"`
+
 	// Assign each task a public IP. Default false.
 	// TODO to access ECR you need a nat gateway or a public address and so if you
 	// set this to false in the default subnets, ECS can't pull the image. Leaving
 	// it disabled until we figure out how to handle that onramp case.
 	// AssignPublicIp bool `hcl:"assign_public_ip,optional"`
 
+	// Port that your service is running on within the actual container.
+	// Defaults to port 3000.
+	ServicePort int64 `hcl:"service_port,optional"`
+
 	// Indicate that service should be deployed on an EC2 cluster.
 	EC2Cluster bool `hcl:"ec2_cluster,optional"`
 
 	// Configuration options for how the ALB will be configured.
 	ALB *ALBConfig `hcl:"alb,block"`
+
+	// Configuration options for additional containers
+	ContainersConfig []*ContainerConfig `hcl:"sidecar,block"`
 }
 
 func (p *Platform) Documentation() (*docs.Documentation, error) {
-	doc, err := docs.New(docs.FromConfig(&Config{}))
+	doc, err := docs.New(docs.FromConfig(&Config{}), docs.FromFunc(p.DeployFunc()))
 	if err != nil {
 		return nil, err
 	}
@@ -1158,7 +1372,7 @@ func (p *Platform) Documentation() (*docs.Documentation, error) {
 deploy {
   use "aws-ecs" {
     region = "us-east-1"
-    memory = "512"
+    memory = 512
   }
 }
 `)
@@ -1188,9 +1402,14 @@ deploy {
 	)
 
 	doc.SetField(
-		"role_name",
+		"execution_role_name",
 		"the name of the IAM role to use for ECS execution",
-		docs.Default("create a new IAM role based on the application name"),
+		docs.Default("create a new exeuction IAM role based on the application name"),
+	)
+
+	doc.SetField(
+		"task_role_name",
+		"the name of the task IAM role to assign",
 	)
 
 	doc.SetField(
@@ -1222,6 +1441,16 @@ deploy {
 			"will not be created if it doesn't exist, only that there as existing cluster",
 			"this is using EC2 and not Fargate",
 		),
+	)
+
+	doc.SetField(
+		"static_environment",
+		"static environment variables to make available",
+	)
+
+	doc.SetField(
+		"secrets",
+		"secret key/values to pass to the ECS container",
 	)
 
 	doc.SetField(
@@ -1258,6 +1487,60 @@ deploy {
 		),
 	)
 
+	doc.SetField(
+		"sidecar",
+		"Additional container to run as a sidecar.",
+		docs.Summary(
+			"This runs additional containers in addition to the main container that",
+			"comes from the build phase.",
+		),
+	)
+
+	doc.SetField(
+		"sidecar.name",
+		"Name of the container",
+	)
+
+	doc.SetField(
+		"sidecar.image",
+		"Image of the sidecar container",
+	)
+
+	doc.SetField(
+		"sidecar.memory",
+		"The amount (in MiB) of memory to present to the container",
+	)
+
+	doc.SetField(
+		"sidecar.memory_reservation",
+		"The soft limit (in MiB) of memory to reserve for the container",
+	)
+
+	doc.SetField(
+		"sidecar.container_port",
+		"The port number for the container",
+	)
+
+	doc.SetField(
+		"sidecar.host_port",
+		"The port number on the host to reserve for the container",
+	)
+
+	doc.SetField(
+		"sidecar.protocol",
+		"The protocol used for port mapping.",
+	)
+
+	doc.SetField(
+		"sidecar.static_environment",
+		"Environment variables to expose to this container",
+	)
+
+	doc.SetField(
+		"sidecar.secrets",
+		"Secrets to expose to this container",
+	)
+
 	var memvals []int
 
 	for k := range fargateResources {
@@ -1288,6 +1571,12 @@ deploy {
 			"the container is using. Here is a complete listing of possible values:\n",
 			sb.String(),
 		),
+	)
+
+	doc.SetField(
+		"service_port",
+		"the TCP port that the application is listening on",
+		docs.Default("3000"),
 	)
 
 	return doc, nil

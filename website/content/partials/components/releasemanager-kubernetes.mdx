@@ -4,7 +4,13 @@ Manipulates the Kubernetes Service activate Deployments.
 
 ### Interface
 
-### Variables
+### Required Parameters
+
+This plugin has no required parameters.
+
+### Optional Parameters
+
+These parameters are used in the [`use` stanza](/docs/waypoint-hcl/use) for this plugin.
 
 #### context
 
@@ -29,6 +35,15 @@ Indicates if the Kubernetes Service should LoadBalancer type.
 If the Kubernetes Service is not a LoadBalancer and node_port is not set, then the Service uses ClusterIP.
 
 - Type: **bool**
+- **Optional**
+
+#### namespace
+
+Namespace to create Service in.
+
+Namespace is the name of the Kubernetes namespace to create the deployment in This is useful to create Services in non-default namespaces without creating kubeconfig contexts for each.
+
+- Type: **string**
 - **Optional**
 
 #### node_port

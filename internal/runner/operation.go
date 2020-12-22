@@ -7,18 +7,17 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-multierror"
-	"github.com/hashicorp/hcl/v2/hclsimple"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/hashicorp/waypoint-plugin-sdk/component"
+	"github.com/hashicorp/waypoint-plugin-sdk/datadir"
+	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 	configpkg "github.com/hashicorp/waypoint/internal/config"
 	"github.com/hashicorp/waypoint/internal/core"
 	"github.com/hashicorp/waypoint/internal/factory"
 	"github.com/hashicorp/waypoint/internal/plugin"
 	pb "github.com/hashicorp/waypoint/internal/server/gen"
-	"github.com/hashicorp/waypoint-plugin-sdk/component"
-	"github.com/hashicorp/waypoint-plugin-sdk/datadir"
-	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 )
 
 // executeJob executes an assigned job. This will source the data (if necessary),
@@ -32,18 +31,15 @@ func (r *Runner) executeJob(
 ) (*pb.Job_Result, error) {
 	// Eventually we'll need to extract the data source. For now we're
 	// just building for local exec so it is the working directory.
-	path := configpkg.Filename
-	if wd != "" {
-		path = filepath.Join(wd, path)
+	path, err := configpkg.FindPath(wd, "", false)
+	if err != nil {
+		return nil, err
 	}
 
 	// Determine the evaluation context we'll be using
-	configCtx := configpkg.EvalContext(filepath.Dir(path))
-
-	// Decode the configuration
-	var cfg configpkg.Config
 	log.Trace("reading configuration", "path", path)
-	if err := hclsimple.DecodeFile(path, configCtx, &cfg); err != nil {
+	cfg, err := configpkg.Load(path, filepath.Dir(path))
+	if err != nil {
 		return nil, err
 	}
 
@@ -72,10 +68,8 @@ func (r *Runner) executeJob(
 		core.WithUI(ui),
 		core.WithComponents(factories),
 		core.WithClient(r.client),
-		core.WithConfig(&cfg),
-		core.WithConfigContext(configCtx),
+		core.WithConfig(cfg),
 		core.WithDataDir(projDir),
-		core.WithRootDir(filepath.Dir(path)),
 		core.WithLabels(job.Labels),
 		core.WithWorkspace(job.Workspace.Workspace),
 		core.WithJobInfo(jobInfo),
@@ -123,6 +117,9 @@ func (r *Runner) executeJob(
 
 	case *pb.Job_Docs:
 		return r.executeDocsOp(ctx, log, job, project)
+
+	case *pb.Job_ConfigSync:
+		return r.executeConfigSyncOp(ctx, log, job, project)
 
 	default:
 		return nil, status.Errorf(codes.Aborted, "unknown operation %T", job.Operation)

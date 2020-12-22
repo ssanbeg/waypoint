@@ -17,9 +17,9 @@ import (
 	"github.com/mitchellh/cli"
 	"github.com/mitchellh/go-glint"
 
+	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 	"github.com/hashicorp/waypoint/internal/pkg/signalcontext"
 	"github.com/hashicorp/waypoint/internal/version"
-	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 )
 
 const (
@@ -171,6 +171,21 @@ func Commands(
 				baseCommand: baseCommand,
 			}, nil
 		},
+		"config source-get": func() (cli.Command, error) {
+			return &ConfigSourceGetCommand{
+				baseCommand: baseCommand,
+			}, nil
+		},
+		"config source-set": func() (cli.Command, error) {
+			return &ConfigSourceSetCommand{
+				baseCommand: baseCommand,
+			}, nil
+		},
+		"config sync": func() (cli.Command, error) {
+			return &ConfigSyncCommand{
+				baseCommand: baseCommand,
+			}, nil
+		},
 		"logs": func() (cli.Command, error) {
 			return &LogsCommand{
 				baseCommand: baseCommand,
@@ -264,7 +279,16 @@ func Commands(
 				baseCommand: baseCommand,
 			}, nil
 		},
-
+		"server snapshot": func() (cli.Command, error) {
+			return &SnapshotBackupCommand{
+				baseCommand: baseCommand,
+			}, nil
+		},
+		"server restore": func() (cli.Command, error) {
+			return &SnapshotRestoreCommand{
+				baseCommand: baseCommand,
+			}, nil
+		},
 		"plugin": func() (cli.Command, error) {
 			return &PluginCommand{
 				baseCommand: baseCommand,
@@ -424,7 +448,7 @@ func logger(args []string) ([]string, hclog.Logger, io.Writer, error) {
 	// This overrides whatever the env var set.
 	var outArgs []string
 	for _, arg := range args {
-		if arg[0] != '-' {
+		if len(arg) != 0 && arg[0] != '-' {
 			outArgs = append(outArgs, arg)
 			continue
 		}
@@ -603,7 +627,7 @@ Waypoint will inject into your application via environment variables.
 This can be used to set values such as ports to listen on, database URLs,
 etc.
 
-For more information see: https://waypointproject.io/docs/config
+For more information see: https://waypointproject.io/docs/app-config
 `,
 	},
 

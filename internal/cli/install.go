@@ -1,266 +1,33 @@
 package cli
 
 import (
-	"bytes"
-	"context"
 	"fmt"
-	"io/ioutil"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/posener/complete"
 	"google.golang.org/grpc"
-	"gopkg.in/yaml.v2"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 	"github.com/hashicorp/waypoint/internal/clicontext"
 	"github.com/hashicorp/waypoint/internal/clierrors"
-	configpkg "github.com/hashicorp/waypoint/internal/config"
 	"github.com/hashicorp/waypoint/internal/pkg/flag"
 	pb "github.com/hashicorp/waypoint/internal/server/gen"
 	"github.com/hashicorp/waypoint/internal/serverclient"
+	"github.com/hashicorp/waypoint/internal/serverconfig"
 	"github.com/hashicorp/waypoint/internal/serverinstall"
 )
 
 type InstallCommand struct {
 	*baseCommand
 
-	config            serverinstall.Config
-	showYaml          bool
-	advertiseInternal bool
-	contextName       string
-	contextDefault    bool
-	platform          string
-	secretFile        string
+	platform       string
+	contextName    string
+	contextDefault bool
 
 	flagAcceptTOS bool
-}
-
-func (c *InstallCommand) InstallKubernetes(
-	ctx context.Context, st terminal.Status, log hclog.Logger,
-) (*clicontext.Config, *pb.ServerConfig_AdvertiseAddr, string, int) {
-	stdout, stderr, err := c.ui.OutputWriters()
-	if err != nil {
-		panic(err)
-	}
-
-	if c.secretFile != "" {
-		data, err := ioutil.ReadFile(c.secretFile)
-		if err != nil {
-			c.ui.Output(
-				"Error reading Kubernetes secret file: %s", clierrors.Humanize(err),
-				terminal.WithErrorStyle(),
-			)
-			return nil, nil, "", 1
-		}
-
-		var secretData struct {
-			Metadata struct {
-				Name string `yaml:"name"`
-			} `yaml:"metadata"`
-		}
-
-		err = yaml.Unmarshal(data, &secretData)
-		if err != nil {
-			c.ui.Output(
-				"Error reading Kubernetes secret file: %s", clierrors.Humanize(err),
-				terminal.WithErrorStyle(),
-			)
-			return nil, nil, "", 1
-		}
-
-		if secretData.Metadata.Name == "" {
-			c.ui.Output(
-				"Invalid secret, no metadata.name",
-				terminal.WithErrorStyle(),
-			)
-			return nil, nil, "", 1
-		}
-
-		c.config.ImagePullSecret = secretData.Metadata.Name
-
-		c.ui.Output("Installing kubernetes secret...")
-
-		cmd := exec.Command("kubectl", "create", "-f", "-")
-		cmd.Stdin = bytes.NewReader(data)
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-
-		err = cmd.Run()
-		if err != nil {
-			c.ui.Output(
-				"Error executing kubectl to install secret: %s", clierrors.Humanize(err),
-				terminal.WithErrorStyle(),
-			)
-
-			return nil, nil, "", 1
-		}
-	}
-
-	// Decode our configuration
-	output, err := serverinstall.Render(&c.config)
-	if err != nil {
-		c.ui.Output(
-			"Error generating configuration: %s", clierrors.Humanize(err),
-			terminal.WithErrorStyle(),
-		)
-		return nil, nil, "", 1
-	}
-
-	if c.showYaml {
-		fmt.Fprint(stdout, output)
-		if output[:len(output)-1] != "\n" {
-			fmt.Fprint(stdout, "\n")
-		}
-
-		return nil, nil, "", 0
-	}
-
-	cmd := exec.Command("kubectl", "create", "-f", "-")
-	cmd.Stdin = strings.NewReader(output)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-
-	err = cmd.Run()
-	if err != nil {
-		c.ui.Output(
-			"Error executing kubectl: %s", clierrors.Humanize(err),
-			terminal.WithErrorStyle(),
-		)
-
-		return nil, nil, "", 1
-	}
-
-	st.Update("Waiting for Kubernetes service to be ready...")
-
-	// Build our K8S client.
-	config := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		clientcmd.NewDefaultClientConfigLoadingRules(),
-		&clientcmd.ConfigOverrides{},
-	)
-	clientconfig, err := config.ClientConfig()
-	if err != nil {
-		c.ui.Output(
-			"Error initializing kubernetes client: %s", clierrors.Humanize(err),
-			terminal.WithErrorStyle(),
-		)
-		return nil, nil, "", 1
-	}
-
-	clientset, err := kubernetes.NewForConfig(clientconfig)
-	if err != nil {
-		c.ui.Output(
-			"Error initializing kubernetes client: %s", clierrors.Humanize(err),
-			terminal.WithErrorStyle(),
-		)
-		return nil, nil, "", 1
-	}
-
-	// Wait for our service to be ready
-	log.Info("waiting for server service to become ready")
-	var contextConfig clicontext.Config
-	var advertiseAddr pb.ServerConfig_AdvertiseAddr
-	var httpAddr string
-	var grpcAddr string
-
-	err = wait.PollImmediate(2*time.Second, 10*time.Minute, func() (bool, error) {
-		svc, err := clientset.CoreV1().Services(c.config.Namespace).Get(
-			ctx, c.config.ServiceName, metav1.GetOptions{})
-		if err != nil {
-			return false, err
-		}
-
-		ingress := svc.Status.LoadBalancer.Ingress
-		if len(ingress) == 0 {
-			log.Trace("ingress list is empty, waiting")
-			return false, nil
-		}
-
-		addr := ingress[0].IP
-		if addr == "" {
-			addr = ingress[0].Hostname
-		}
-
-		// No address, still not ready
-		if addr == "" {
-			log.Trace("address is empty, waiting")
-			return false, nil
-		}
-
-		// Get the ports
-		var grpcPort int32
-		var httpPort int32
-		for _, spec := range svc.Spec.Ports {
-			if spec.Name == "grpc" {
-				grpcPort = spec.Port
-			}
-
-			if spec.Name == "http" {
-				httpPort = spec.Port
-			}
-
-			if httpPort != 0 && grpcPort != 0 {
-				break
-			}
-		}
-		if grpcPort == 0 || httpPort == 0 {
-			// If we didn't find the port, retry...
-			log.Trace("no port found on service, retrying")
-			return false, nil
-		}
-
-		// Set the grpc address
-		grpcAddr = fmt.Sprintf("%s:%d", addr, grpcPort)
-		log.Info("server service ready", "addr", addr)
-
-		// HTTP address to return
-		httpAddr = fmt.Sprintf("%s:%d", addr, httpPort)
-		log.Info("http server ready", "httpAddr", addr)
-
-		// Set our advertise address
-		advertiseAddr.Addr = grpcAddr
-		advertiseAddr.Tls = true
-		advertiseAddr.TlsSkipVerify = true
-
-		// If we want internal or we're a localhost address, we use the internal
-		// address. The "localhost" check is specifically for Docker for Desktop
-		// since pods can't reach this.
-		if c.advertiseInternal || strings.HasPrefix(grpcAddr, "localhost:") {
-			advertiseAddr.Addr = fmt.Sprintf("%s:%d",
-				c.config.ServiceName,
-				grpcPort,
-			)
-		}
-
-		// Set our connection information
-		contextConfig = clicontext.Config{
-			Server: configpkg.Server{
-				Address:       grpcAddr,
-				Tls:           true,
-				TlsSkipVerify: true, // always for now
-			},
-		}
-
-		return true, nil
-	})
-	if err != nil {
-		c.ui.Output(
-			"Error waiting for service ready: %s\n\n%s",
-			clierrors.Humanize(err),
-			errInstallRunning,
-			terminal.WithErrorStyle(),
-		)
-		return nil, nil, "", 1
-	}
-
-	return &contextConfig, &advertiseAddr, httpAddr, 0
+	flagRunner    bool
 }
 
 func (c *InstallCommand) Run(args []string) int {
@@ -288,52 +55,44 @@ func (c *InstallCommand) Run(args []string) int {
 		advertiseAddr *pb.ServerConfig_AdvertiseAddr
 	)
 
-	st := c.ui.Status()
-	defer st.Close()
-
 	var err error
 	var httpAddr string
 
-	switch c.platform {
-	case "docker":
-		contextConfig, advertiseAddr, httpAddr, err = serverinstall.InstallDocker(ctx, c.ui, st, &c.config)
-		if err != nil {
-			c.ui.Output(
-				"Error installing server into docker: %s", clierrors.Humanize(err),
-				terminal.WithErrorStyle(),
-			)
-
-			return 1
-		}
-	case "kubernetes":
-		var code int
-		contextConfig, advertiseAddr, httpAddr, code = c.InstallKubernetes(ctx, st, log)
-		if code != 0 || c.showYaml {
-			return code
-		}
-
-		// ok, inline below.
-	case "nomad":
-		contextConfig, advertiseAddr, httpAddr, err = serverinstall.InstallNomad(ctx, c.ui, st, &c.config)
-		if err != nil {
-			c.ui.Output(
-				"Error installing server into Nomad: %s", clierrors.Humanize(err),
-				terminal.WithErrorStyle(),
-			)
-
-			return 1
-		}
-	default:
+	p, ok := serverinstall.Platforms[strings.ToLower(c.platform)]
+	if !ok {
 		c.ui.Output(
-			"Unknown server platform: %s", c.platform,
+			"Error installing server into %s: invalid platform",
+			c.platform,
 			terminal.WithErrorStyle(),
 		)
 
 		return 1
 	}
 
+	result, err := p.Install(ctx, &serverinstall.InstallOpts{
+		Log: log,
+		UI:  c.ui,
+	})
+	if err != nil {
+		c.ui.Output(
+			"Error installing server into %s: %s", c.platform, clierrors.Humanize(err),
+			terminal.WithErrorStyle(),
+		)
+
+		return 1
+	}
+
+	contextConfig = result.Context
+	advertiseAddr = result.AdvertiseAddr
+	httpAddr = result.HTTPAddr
+
+	sg := c.ui.StepGroup()
+	defer sg.Wait()
+
+	s := sg.Add("Connecting to: %s", contextConfig.Server.Address)
+	defer func() { s.Abort() }()
+
 	// Connect
-	st.Update(fmt.Sprintf("Service ready. Connecting to: %s", contextConfig.Server.Address))
 	log.Info("connecting to the server so we can set the server config", "addr", contextConfig.Server.Address)
 	conn, err := serverclient.Connect(ctx,
 		serverclient.FromContextConfig(contextConfig),
@@ -350,9 +109,10 @@ func (c *InstallCommand) Run(args []string) int {
 	}
 	client := pb.NewWaypointClient(conn)
 
+	s.Update("Retrieving initial auth token...")
+
 	// We need our bootstrap token immediately
 	var callOpts []grpc.CallOption
-	st.Update("Retrieving initial auth token...")
 	tokenResp, err := client.BootstrapToken(ctx, &empty.Empty{})
 	if err != nil {
 		c.ui.Output(
@@ -396,8 +156,27 @@ func (c *InstallCommand) Run(args []string) int {
 		}
 	}
 
+	// Reconnect with the token set. The `contextConfig` has the token set on
+	// it now so we can just reconnect with the same context.
+	log.Info("reconnecting with our bootstrap token", "addr", contextConfig.Server.Address)
+	conn.Close()
+	conn, err = serverclient.Connect(ctx,
+		serverclient.FromContextConfig(contextConfig),
+		serverclient.Timeout(5*time.Minute),
+	)
+	if err != nil {
+		c.ui.Output(
+			"Error connecting to server with bootstrap token: %s\n\n%s",
+			clierrors.Humanize(err),
+			errInstallRunning,
+			terminal.WithErrorStyle(),
+		)
+		return 1
+	}
+	client = pb.NewWaypointClient(conn)
+
 	// Set the config
-	st.Update("Configuring server...")
+	s.Update("Configuring server...")
 	log.Debug("setting the advertise address", "addr", fmt.Sprintf("%#v", advertiseAddr))
 	_, err = client.SetServerConfig(ctx, &pb.SetServerConfigRequest{
 		Config: &pb.ServerConfig{
@@ -416,12 +195,64 @@ func (c *InstallCommand) Run(args []string) int {
 		return 1
 	}
 
+	s.Update("Server installed and configured!")
+	s.Done()
+
+	if c.flagRunner {
+		s = sg.Add("")
+
+		// We need a new auth token for the runner so that the runner
+		// can connect to the server. We don't want to reuse the bootstrap
+		// token that is shared with the CLI cause that can be revoked.
+		s.Update("Retrieving new auth token for runner...")
+		resp, err := client.GenerateLoginToken(c.Ctx, &empty.Empty{})
+		if err != nil {
+			c.ui.Output(
+				"Error retrieving auth token for runner: %s\n\n%s",
+				clierrors.Humanize(err),
+				errInstallRunner,
+				terminal.WithErrorStyle(),
+			)
+			return 1
+		}
+
+		// Build a serverconfig that uses the advertise addr and includes
+		// the token we just requested.
+		connConfig := &serverconfig.Client{
+			Address:       advertiseAddr.Addr,
+			Tls:           advertiseAddr.Tls,
+			TlsSkipVerify: advertiseAddr.TlsSkipVerify,
+			RequireAuth:   true,
+			AuthToken:     resp.Token,
+		}
+
+		// Install!
+		s.Update("Installing runner...")
+		err = p.InstallRunner(ctx, &serverinstall.InstallRunnerOpts{
+			Log:             log,
+			UI:              c.ui,
+			AuthToken:       resp.Token,
+			AdvertiseAddr:   advertiseAddr,
+			AdvertiseClient: connConfig,
+		})
+		if err != nil {
+			c.ui.Output(
+				"Error installing the runner: %s\n\n%s",
+				clierrors.Humanize(err),
+				errInstallRunner,
+				terminal.WithErrorStyle(),
+			)
+			return 1
+		}
+
+		s.Done()
+	}
+
 	// Close and success
-	st.Close()
 	c.ui.Output(outInstallSuccess,
 		c.contextName,
 		advertiseAddr.Addr,
-		httpAddr,
+		"https://"+httpAddr,
 		terminal.WithSuccessStyle(),
 	)
 	return 0
@@ -430,60 +261,11 @@ func (c *InstallCommand) Run(args []string) int {
 func (c *InstallCommand) Flags() *flag.Sets {
 	return c.flagSet(0, func(set *flag.Sets) {
 		f := set.NewSet("Command Options")
-		f.StringVar(&flag.StringVar{
-			Name:    "namespace",
-			Target:  &c.config.Namespace,
-			Usage:   "Kubernetes namespace install into.",
-			Default: "default",
-		})
-
-		f.StringVar(&flag.StringVar{
-			Name:    "service",
-			Target:  &c.config.ServiceName,
-			Usage:   "Name of the Kubernetes service for the server.",
-			Default: "waypoint",
-		})
-
-		f.StringVar(&flag.StringVar{
-			Name:    "server-image",
-			Target:  &c.config.ServerImage,
-			Usage:   "Docker image for the server image.",
-			Default: "hashicorp/waypoint:latest",
-		})
-
-		f.StringMapVar(&flag.StringMapVar{
-			Name:   "annotate-service",
-			Target: &c.config.ServiceAnnotations,
-			Usage:  "Annotations for the Service generated.",
-		})
-
-		f.StringVar(&flag.StringVar{
-			Name:    "pull-secret",
-			Target:  &c.config.ImagePullSecret,
-			Usage:   "Secret to use to access the waypoint server image",
-			Default: "github",
-		})
-
-		f.StringVar(&flag.StringVar{
-			Name:    "pull-policy",
-			Target:  &c.config.ImagePullPolicy,
-			Usage:   "",
-			Default: "Always",
-		})
-
 		f.BoolVar(&flag.BoolVar{
-			Name:   "show-yaml",
-			Target: &c.showYaml,
-			Usage:  "Show the YAML to be send to the cluster.",
-		})
-
-		f.BoolVar(&flag.BoolVar{
-			Name:   "advertise-internal",
-			Target: &c.advertiseInternal,
-			Usage: "Advertise the internal service address rather than the external. " +
-				"This is useful if all your deployments will be able to access the private " +
-				"service address. This will default to false but will be automatically set to " +
-				"true if the external host is detected to be localhost.",
+			Name:    "accept-tos",
+			Target:  &c.flagAcceptTOS,
+			Usage:   acceptTOSHelp,
+			Default: false,
 		})
 
 		f.StringVar(&flag.StringVar{
@@ -504,24 +286,22 @@ func (c *InstallCommand) Flags() *flag.Sets {
 		f.StringVar(&flag.StringVar{
 			Name:    "platform",
 			Target:  &c.platform,
-			Default: "kubernetes",
-			Usage:   "Platform to install the server into.",
-		})
-
-		f.StringVar(&flag.StringVar{
-			Name:   "secret-file",
-			Target: &c.secretFile,
-			Usage:  "Use the Kubernetes Secret in the given path to access the waypoint server image",
+			Default: "",
+			Usage:   "Platform to install the Waypoint server into.",
 		})
 
 		f.BoolVar(&flag.BoolVar{
-			Name:    "accept-tos",
-			Target:  &c.flagAcceptTOS,
-			Usage:   acceptTOSHelp,
+			Name:    "x-runner",
+			Target:  &c.flagRunner,
+			Usage:   "Install a runner in addition to the server",
 			Default: false,
+			Hidden:  true,
 		})
 
-		serverinstall.NomadFlags(f)
+		for name, platform := range serverinstall.Platforms {
+			platformSet := set.NewSet(name + " Options")
+			platform.InstallFlags(platformSet)
+		}
 	})
 }
 
@@ -542,7 +322,8 @@ func (c *InstallCommand) Help() string {
 Usage: waypoint server install [options]
 Alias: waypoint install
 
-  Installs a Waypoint server to an existing Kubernetes cluster.
+	Installs a Waypoint server to an existing platform. The platform should be
+	specified as kubernetes, nomad, or docker.
 
   By default, this will also automatically create a new default CLI context
   (see "waypoint context") so the CLI will be configured to use the newly
@@ -565,6 +346,13 @@ advertise address. You must do this manually using "waypoint context"
 and "waypoint server config-set".
 `)
 
+	errInstallRunner = strings.TrimSpace(`
+The Waypoint runner failed to install. This error occurred after the
+Waypoint server was successfully installed. Your CLI is configured to
+use the installed server. If you want to retry, you must uninstall the
+server first.
+`)
+
 	outInstallSuccess = strings.TrimSpace(`
 Waypoint server successfully installed and configured!
 
@@ -578,6 +366,6 @@ deployments. If this is incorrect, manually set it using the CLI command
 "waypoint server config-set".
 
 Advertise Address: %[2]s
-HTTP UI Address: %[3]s
+Web UI Address: %[3]s
 `)
 )

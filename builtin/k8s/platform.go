@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/mitchellh/mapstructure"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,7 +66,17 @@ func (p *Platform) ValidateAuth() error {
 
 // DefaultReleaserFunc implements component.PlatformReleaser
 func (p *Platform) DefaultReleaserFunc() interface{} {
-	return func() *Releaser { return &Releaser{} }
+	var rc ReleaserConfig
+	if err := mapstructure.Decode(p.config, &rc); err != nil {
+		// shouldn't happen
+		panic("error decoding config: " + err.Error())
+	}
+
+	return func() *Releaser {
+		return &Releaser{
+			config: rc,
+		}
+	}
 }
 
 // Deploy deploys an image to Kubernetes.
@@ -94,6 +105,11 @@ func (p *Platform) Deploy(
 	clientset, ns, config, err := clientset(p.config.KubeconfigPath, p.config.Context)
 	if err != nil {
 		return nil, err
+	}
+
+	// Override namespace if set
+	if p.config.Namespace != "" {
+		ns = p.config.Namespace
 	}
 
 	step.Update("Kubernetes client connected to %s with namespace %s", config.Host, ns)
@@ -405,6 +421,11 @@ func (p *Platform) Destroy(
 		return err
 	}
 
+	// Override namespace if set
+	if p.config.Namespace != "" {
+		ns = p.config.Namespace
+	}
+
 	step.Update("Kubernetes client connected to %s with namespace %s", config.Host, ns)
 	step.Done()
 	step = sg.Add("Deleting deployment...")
@@ -466,10 +487,13 @@ type Config struct {
 	// TODO Evaluate if this should remain as a default 3000, should be a required field,
 	// or default to another port.
 	ServicePort uint `hcl:"service_port,optional"`
+
+	// Namespace is the Kubernetes namespace to target the deployment to.
+	Namespace string `hcl:"namespace,optional"`
 }
 
 func (p *Platform) Documentation() (*docs.Documentation, error) {
-	doc, err := docs.New(docs.FromConfig(&Config{}))
+	doc, err := docs.New(docs.FromConfig(&Config{}), docs.FromFunc(p.DeployFunc()))
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +503,7 @@ func (p *Platform) Documentation() (*docs.Documentation, error) {
 	doc.Example(`
 deploy "kubernetes" {
 	image_secret = "registry_secret"
-	count = 3
+	replicas = 3
 	probe_path = "/_healthz"
 }
 `)
@@ -562,6 +586,15 @@ deploy "kubernetes" {
 		docs.Summary(
 			"service account is the name of the Kubernetes service account to add to the pod.",
 			"This is useful to apply Kubernetes RBAC to the application.",
+		),
+	)
+
+	doc.SetField(
+		"namespace",
+		"namespace to target deployment into",
+		docs.Summary(
+			"namespace is the name of the Kubernetes namespace to apply the deployment in",
+			"This is useful to create deployments in non-default namespaces without creating kubeconfig contexts for each",
 		),
 	)
 

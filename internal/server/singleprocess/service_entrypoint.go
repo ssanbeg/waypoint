@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-memdb"
 	"google.golang.org/grpc/codes"
@@ -97,6 +98,13 @@ func (s *service) EntrypointConfig(
 			})
 		}
 
+		// Write our deployment info
+		config.Deployment = &pb.EntrypointConfig_DeploymentInfo{
+			Component: deployment.Component,
+			Labels:    deployment.Labels,
+		}
+
+		// Get the config vars in use
 		vars, err := s.state.ConfigGetWatch(&pb.ConfigGetRequest{
 			Scope: &pb.ConfigGetRequest_Application{
 				Application: deployment.Application,
@@ -106,6 +114,24 @@ func (s *service) EntrypointConfig(
 			return err
 		}
 		config.EnvVars = vars
+
+		// Get the config sources we need for our vars. We only do this if
+		// at least one var has a dynamic value.
+		if varContainsDynamic(vars) {
+			// NOTE(mitchellh): For now we query all the types and always send it
+			// all down. In the future we may want to consider filtering this
+			// by only the types we actually need above.
+			sources, err := s.state.ConfigSourceGetWatch(&pb.GetConfigSourceRequest{
+				Scope: &pb.GetConfigSourceRequest_Global{
+					Global: &pb.Ref_Global{},
+				},
+			}, ws)
+			if err != nil {
+				return err
+			}
+
+			config.ConfigSources = sources
+		}
 
 		// If we have the URL service setup, note that
 		if v := s.urlConfig; v != nil {
@@ -119,6 +145,7 @@ func (s *service) EntrypointConfig(
 				hznLabelApp+"="+deployment.Application.Application,
 				hznLabelProject+"="+deployment.Application.Project,
 				hznLabelWorkspace+"="+deployment.Workspace.Workspace,
+				hznLabelInstance+"="+record.Id,
 
 				":deployment=v"+strconv.FormatUint(deployment.Sequence, 10),
 				":deployment-order="+strings.ToLower(deployment.Id),
@@ -198,7 +225,6 @@ func (s *service) EntrypointLogStream(
 	}
 }
 
-// TODO: test
 func (s *service) EntrypointExecStream(
 	server pb.Waypoint_EntrypointExecStreamServer,
 ) error {
@@ -229,19 +255,6 @@ func (s *service) EntrypointExecStream(
 	}
 	log.Debug("exec stream open")
 
-	// Always close the event channel which signals to the reader end that
-	// we are done.
-	defer close(exec.EntrypointEventCh)
-
-	// Note to the caller that we're opened
-	if err := server.Send(&pb.EntrypointExecResponse{
-		Event: &pb.EntrypointExecResponse_Opened{
-			Opened: true,
-		},
-	}); err != nil {
-		return err
-	}
-
 	// Create a context we can use to cancel
 	ctx, cancel := context.WithCancel(server.Context())
 	defer cancel()
@@ -251,6 +264,11 @@ func (s *service) EntrypointExecStream(
 	errCh := make(chan error, 1)
 	go func() {
 		defer cancel()
+
+		// Close the event channel we send to. This signals to the receiving
+		// side in StartExecStream (service_exec.go) that the entrypoint
+		// exited and it should also exit the client stream.
+		defer close(exec.EntrypointEventCh)
 
 		for {
 			log.Trace("waiting for entrypoint exec event")
@@ -290,6 +308,19 @@ func (s *service) EntrypointExecStream(
 		}
 	}()
 
+	// Note to the caller that we're opened. It is very important that
+	// we call this AFTER the goroutine is started above so that we
+	// properly close the exec.EntrypointEventCh channel. This channel has
+	// to be closed when this function exits so that the client side properly
+	// exits.
+	if err := server.Send(&pb.EntrypointExecResponse{
+		Event: &pb.EntrypointExecResponse_Opened{
+			Opened: true,
+		},
+	}); err != nil {
+		return err
+	}
+
 	// Loop through our receive loop
 	for {
 		select {
@@ -327,6 +358,13 @@ func (s *service) handleClientExecRequest(
 			},
 		}
 
+	case *pb.ExecStreamRequest_InputEof:
+		send = &pb.EntrypointExecResponse{
+			Event: &pb.EntrypointExecResponse_InputEof{
+				InputEof: &empty.Empty{},
+			},
+		}
+
 	case *pb.ExecStreamRequest_Winch:
 		send = &pb.EntrypointExecResponse{
 			Event: &pb.EntrypointExecResponse_Winch{
@@ -344,4 +382,15 @@ func (s *service) handleClientExecRequest(
 	}
 
 	return nil
+}
+
+// varContainsDynamic returns true if there are any dynamic values in the list.
+func varContainsDynamic(vars []*pb.ConfigVar) bool {
+	for _, v := range vars {
+		if _, ok := v.Value.(*pb.ConfigVar_Dynamic); ok {
+			return true
+		}
+	}
+
+	return false
 }

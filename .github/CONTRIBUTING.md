@@ -21,8 +21,8 @@ work on an issue, comment on it first and tell us the approach you want to take.
 * Report potential bugs.
 * Suggest product enhancements.
 * Increase our test coverage.
-* Fix a [bug](https://github.com/hashicorp/waypoint/labels/type/bug).
-* Implement a requested [enhancement](https://github.com/hashicorp/waypoint/labels/type/enhancement).
+* Fix a [bug](https://github.com/hashicorp/waypoint/labels/bug).
+* Implement a requested [enhancement](https://github.com/hashicorp/waypoint/labels/enhancement).
 * Improve our guides and documentation.
 
 ### Reporting an Issue:
@@ -44,6 +44,10 @@ an issue long enough, we are usually forced to close the issue.
 * As part of the test case, please include any Waypoint configurations
 (`waypoint.hcl`), build configs such as Dockerfiles, etc. Log output with
 log level set with verbose flags (at least `-vv`) is helpful too.
+
+* If the issue is related to the browser UI, please also include the name 
+and version of the browser and any extensions that may be interacting 
+with the UI
 
 * Aim to respond promptly to any questions made by the Waypoint team on your
 issue. Stale issues will be closed.
@@ -69,6 +73,11 @@ issue. Stale issues will be closed.
 
 If you wish to work on Waypoint itself, you'll first need [Go](https://golang.org)
 installed (version 1.14+ is _required_).
+
+[go-bindata](https://github.com/go-bindata/go-bindata) is a binary dependency
+that must be on your PATH to build Waypoint. This 
+[repository version](https://github.com/kevinburke/go-bindata/) may be installed with:
+`go get -u github.com/kevinburke/go-bindata/...`
 
 Next, clone this repository and then run `make bin`. In a few moments, you'll have a working
 `waypoint` executable in the Waypoint repository root and `$GOPATH/bin`:

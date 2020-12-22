@@ -5,11 +5,11 @@ import (
 
 	"github.com/posener/complete"
 
+	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 	clientpkg "github.com/hashicorp/waypoint/internal/client"
 	"github.com/hashicorp/waypoint/internal/clierrors"
 	"github.com/hashicorp/waypoint/internal/pkg/flag"
 	pb "github.com/hashicorp/waypoint/internal/server/gen"
-	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 )
 
 type ArtifactPushCommand struct {
@@ -28,7 +28,7 @@ func (c *ArtifactPushCommand) Run(args []string) int {
 
 	client := c.project.Client()
 
-	c.DoApp(c.Ctx, func(ctx context.Context, app *clientpkg.App) error {
+	err := c.DoApp(c.Ctx, func(ctx context.Context, app *clientpkg.App) error {
 		// Get the most recent build
 		build, err := client.GetLatestBuild(ctx, &pb.GetLatestBuildRequest{
 			Application: app.Ref(),
@@ -50,6 +50,9 @@ func (c *ArtifactPushCommand) Run(args []string) int {
 
 		return nil
 	})
+	if err != nil {
+		return 1
+	}
 
 	return 0
 }

@@ -1,4 +1,4 @@
-import styles from './HomePage.module.css'
+import styles from './style.module.css'
 import InfoGrid from 'components/info-grid'
 import AnimatedStepsList from 'components/animated-steps-list'
 import HomepageSection from 'components/homepage-section'
@@ -6,7 +6,10 @@ import HomepageHero from 'components/homepage-hero'
 import BrandedCta from 'components/branded-cta'
 import WaypointDiagram from 'components/waypoint-diagram'
 import Features from 'components/features'
-import Terminal from 'components/terminal'
+import Terminal from '@hashicorp/react-command-line-terminal'
+
+const loadingDots = ['', '.', '. .', '. . .']
+const spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
 export default function HomePage() {
   return (
@@ -102,12 +105,7 @@ export default function HomePage() {
                   {
                     color: 'white',
                     frames: 4,
-                    code: [
-                      '» Building',
-                      '» Building .',
-                      '» Building . .',
-                      '» Building . . .',
-                    ],
+                    code: loadingDots.map((dots) => `» Building ${dots}`),
                   },
                   {
                     frames: 10,
@@ -121,29 +119,10 @@ export default function HomePage() {
                   },
                   {
                     frames: 2,
-                    code: [
-                      '⠋ Building image',
-                      '⠙ Building image',
-                      '⠹ Building image',
-                      '⠸ Building image',
-                      '⠼ Building image',
-                      '⠴ Building image',
-                      '⠦ Building image',
-                      '⠧ Building image',
-                      '⠇ Building image',
-                      '⠏ Building image',
-                      '⠋ Building image',
-                      '⠙ Building image',
-                      '⠹ Building image',
-                      '⠸ Building image',
-                      '⠼ Building image',
-                      '⠴ Building image',
-                      '⠦ Building image',
-                      '⠧ Building image',
-                      '⠇ Building image',
-                      '⠏ Building image',
-                      '  Building image',
-                    ],
+                    code: spinner
+                      .concat(spinner)
+                      .map((step) => `${step} Building image`)
+                      .concat('  Building image'),
                   },
                   {
                     frames: 5,
@@ -292,12 +271,7 @@ export default function HomePage() {
                   {
                     color: 'white',
                     frames: 4,
-                    code: [
-                      '» Deploying',
-                      '» Deploying .',
-                      '» Deploying . .',
-                      '» Deploying . . .',
-                    ],
+                    code: loadingDots.map((dots) => `» Deploying ${dots}`),
                   },
                   {
                     frames: 5,
@@ -307,56 +281,21 @@ export default function HomePage() {
                   {
                     frames: 2,
                     color: 'gray',
-                    code: [
-                      '⠋ Preparing deployment',
-                      '⠙ Preparing deployment',
-                      '⠹ Preparing deployment',
-                      '⠸ Preparing deployment',
-                      '⠼ Preparing deployment',
-                      '⠴ Preparing deployment',
-                      '⠦ Preparing deployment',
-                      '⠧ Preparing deployment',
-                      '⠇ Preparing deployment',
-                      '⠏ Preparing deployment',
-                      '⠋ Preparing deployment',
-                      '⠙ Preparing deployment',
-                      '⠹ Preparing deployment',
-                      '⠸ Preparing deployment',
-                      '⠼ Preparing deployment',
-                      '⠴ Preparing deployment',
-                      '⠦ Preparing deployment',
-                      '⠧ Preparing deployment',
-                      '⠇ Preparing deployment',
-                      '⠏ Preparing deployment',
-                      '✓ Created deployment',
-                    ],
+                    code: spinner
+                      .concat(spinner)
+                      .map((step) => `${step} Preparing deployment`)
+                      .concat('✓ Created deployment'),
                   },
                   {
                     frames: 2,
                     color: 'gray',
-                    code: [
-                      '⠋ Waiting on deployment to become available: 1/1/0',
-                      '⠙ Waiting on deployment to become available: 1/1/0',
-                      '⠹ Waiting on deployment to become available: 1/1/0',
-                      '⠸ Waiting on deployment to become available: 1/1/0',
-                      '⠼ Waiting on deployment to become available: 1/1/0',
-                      '⠴ Waiting on deployment to become available: 1/1/0',
-                      '⠦ Waiting on deployment to become available: 1/1/0',
-                      '⠧ Waiting on deployment to become available: 1/1/0',
-                      '⠇ Waiting on deployment to become available: 1/1/0',
-                      '⠏ Waiting on deployment to become available: 1/1/0',
-                      '⠋ Waiting on deployment to become available: 1/1/0',
-                      '⠙ Waiting on deployment to become available: 1/1/0',
-                      '⠹ Waiting on deployment to become available: 1/1/0',
-                      '⠸ Waiting on deployment to become available: 1/1/0',
-                      '⠼ Waiting on deployment to become available: 1/1/0',
-                      '⠴ Waiting on deployment to become available: 1/1/0',
-                      '⠦ Waiting on deployment to become available: 1/1/0',
-                      '⠧ Waiting on deployment to become available: 1/1/0',
-                      '⠇ Waiting on deployment to become available: 1/1/0',
-                      '⠏ Waiting on deployment to become available: 1/1/0',
-                      '✓ Deployment successfully rolled out!',
-                    ],
+                    code: spinner
+                      .concat(spinner)
+                      .map(
+                        (step) =>
+                          `${step} Waiting on deployment to become available: 1/1/0`
+                      )
+                      .concat('✓ Deployment successfully rolled out!'),
                   },
                   { code: '' },
                   {
@@ -437,12 +376,7 @@ export default function HomePage() {
                   {
                     frames: 4,
                     color: 'white',
-                    code: [
-                      '» Releasing',
-                      '» Releasing .',
-                      '» Releasing . .',
-                      '» Releasing . . .',
-                    ],
+                    code: loadingDots.map((dots) => `» Releasing ${dots}`),
                   },
                   {
                     frames: 5,
@@ -452,40 +386,18 @@ export default function HomePage() {
                   {
                     frames: 2,
                     color: 'gray',
-                    code: [
-                      '⠋ Preparing service',
-                      '⠙ Preparing service',
-                      '⠹ Preparing service',
-                      '⠸ Preparing service',
-                      '⠼ Preparing service',
-                      '⠴ Preparing service',
-                      '⠦ Preparing service',
-                      '⠧ Preparing service',
-                      '⠇ Preparing service',
-                      '⠏ Preparing service',
-                      '⠋ Preparing service',
-                      '⠙ Preparing service',
-                      '⠹ Preparing service',
-                      '⠸ Preparing service',
-                      '⠼ Preparing service',
-                      '⠴ Preparing service',
-                      '⠦ Preparing service',
-                      '⠧ Preparing service',
-                      '⠇ Preparing service',
-                      '⠏ Preparing service',
-                      '✓ Service is ready!',
-                    ],
+                    code: spinner
+                      .concat(spinner)
+                      .map((step) => `${step} Preparing service`)
+                      .concat('✓ Service is ready!'),
                   },
                   { code: '' },
                   {
                     frames: 4,
                     color: 'white',
-                    code: [
-                      '» Pruning old deployments',
-                      '» Pruning old deployments .',
-                      '» Pruning old deployments . .',
-                      '» Pruning old deployments . . .',
-                    ],
+                    code: loadingDots.map(
+                      (dots) => `» Pruning old deployments ${dots}`
+                    ),
                   },
                   {
                     frames: 5,
@@ -521,6 +433,7 @@ export default function HomePage() {
               learnMoreLink: '/docs/logs',
               content: (
                 <Terminal
+                  theme="waypoint"
                   lines={[
                     { code: '$ waypoint logs' },
                     {
@@ -529,7 +442,7 @@ export default function HomePage() {
                     },
                     {
                       code:
-                        '[11] * Version 3.11.2 (ruby 2.6.6-p146), codename: Love Song',
+                        '[11] * Version 5.0.2 (ruby 2.7.1-p83), codename: Spoony Bard',
                       color: 'gray',
                     },
                     {
@@ -559,6 +472,7 @@ export default function HomePage() {
               learnMoreLink: '/docs/exec',
               content: (
                 <Terminal
+                  theme="waypoint"
                   lines={[
                     { code: '$ waypoint exec bash' },
                     {
@@ -580,6 +494,7 @@ export default function HomePage() {
               learnMoreLink: '/docs/url',
               content: (
                 <Terminal
+                  theme="waypoint"
                   lines={[
                     { code: '$ waypoint deploy' },
                     { code: '' },
@@ -631,10 +546,11 @@ export default function HomePage() {
             {
               title: 'CI/CD and Version Control Integration',
               description:
-                'Integrate with existing CI/CD providers and version control providers like GitHub, CircleCI, Jenkins, and more',
+                'Integrate with existing CI/CD providers and version control providers like GitHub, CircleCI, Jenkins, GitLab, and more',
               learnMoreLink: '/docs/automating-execution',
               content: (
                 <Terminal
+                  theme="waypoint"
                   title="config.yaml"
                   lines={[
                     {
@@ -642,14 +558,12 @@ export default function HomePage() {
                       color: 'white',
                     },
                     {
-                      indent: 1,
                       code:
-                        'WAYPOINT_SERVER_TOKEN: ${{ secrets.WAYPOINT_SERVER_TOKEN }}',
+                        '  WAYPOINT_SERVER_TOKEN: ${{ secrets.WAYPOINT_SERVER_TOKEN }}',
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: 'WAYPOINT_SERVER_ADDR: waypoint.example.com:9701',
+                      code: '  WAYPOINT_SERVER_ADDR: waypoint.example.com:9701',
                       color: 'white',
                     },
                     {
@@ -657,23 +571,19 @@ export default function HomePage() {
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: '- uses: actions/checkout@v2',
+                      code: '  - uses: actions/checkout@v2',
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: '- uses: hashicorp/action-setup-waypoint',
+                      code: '  - uses: hashicorp/action-setup-waypoint',
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: 'with:',
+                      code: '  with:',
                       color: 'white',
                     },
                     {
-                      indent: 2,
-                      code: "version: '0.1.0'",
+                      code: "    version: '0.1.0'",
                       color: 'white',
                     },
                     {
@@ -695,6 +605,7 @@ export default function HomePage() {
               learnMoreLink: '/docs/extending-waypoint',
               content: (
                 <Terminal
+                  theme="waypoint"
                   title="plugin.go"
                   lines={[
                     {
@@ -705,23 +616,19 @@ export default function HomePage() {
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: 'ctx context.Context,',
+                      code: '  ctx context.Context,',
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: 'log hclog.Logger,',
+                      code: '  log hclog.Logger,',
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: 'deployment *Deployment,',
+                      code: '  deployment *Deployment,',
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: 'ui terminal.UI,',
+                      code: '  ui terminal.UI,',
                       color: 'white',
                     },
                     {
@@ -729,44 +636,37 @@ export default function HomePage() {
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: 'client, err := api.NewClient(api.DefaultConfig())',
+                      code:
+                        '  client, err := api.NewClient(api.DefaultConfig())',
                       color: 'white',
                     },
                     {
-                      indent: 1,
-                      code: 'if err != nil {',
+                      code: '  if err != nil {',
                       color: 'gray',
                     },
                     {
-                      indent: 2,
-                      code: 'return err',
+                      code: '    return err',
                       color: 'gray',
                     },
                     {
-                      indent: 1,
-                      code: '}',
+                      code: '  }',
                       color: 'gray',
                     },
                     {
-                      indent: 1,
-                      code: '',
+                      code: '  ',
                       color: 'gray',
                     },
                     {
-                      indent: 1,
-                      code: 'st.Update("Deleting job...")',
+                      code: '  st.Update("Deleting job...")',
                       color: 'gray',
                     },
                     {
-                      indent: 1,
                       code:
-                        '_, _, err = client.Jobs().Deregister(deployment.Id, true, nil)',
+                        '  _, _, err = client.Jobs().Deregister(deployment.Id, true, nil)',
                       color: 'navy',
                     },
                     {
-                      indent: 1,
-                      code: 'return err',
+                      code: '  return err',
                       color: 'gray',
                     },
                     {

@@ -90,6 +90,10 @@ func (p *Platform) Deploy(
 		p.config.ServicePort = 3000
 	}
 
+	if p.config.Datacenter == "" {
+		p.config.Datacenter = "dc1"
+	}
+
 	// Determine if we have a job that we manage already
 	job, _, err := jobclient.Info(result.Name, &api.QueryOptions{})
 	if strings.Contains(err.Error(), "job not found") {
@@ -142,10 +146,19 @@ func (p *Platform) Deploy(
 	job.SetMeta(metaId, result.Id)
 	job.SetMeta(metaNonce, time.Now().UTC().Format(time.RFC3339Nano))
 
-	job.TaskGroups[0].Tasks[0].Config = map[string]interface{}{
+	config := map[string]interface{}{
 		"image": img.Name(),
 		"ports": []string{"waypoint"},
 	}
+
+	if p.config.Auth != nil {
+		config["auth"] = map[string]interface{}{
+			"username": p.config.Auth.Username,
+			"password": p.config.Auth.Password,
+		}
+	}
+
+	job.TaskGroups[0].Tasks[0].Config = config
 	job.TaskGroups[0].Tasks[0].Env = env
 
 	// Register job
@@ -186,7 +199,7 @@ func (p *Platform) Destroy(
 	}
 
 	st.Update("Deleting job...")
-	_, _, err = client.Jobs().Deregister(deployment.Id, true, nil)
+	_, _, err = client.Jobs().Deregister(deployment.Name, true, nil)
 	return err
 }
 
@@ -205,6 +218,9 @@ type Config struct {
 	// outside waypoint, do not set this variable.
 	Count int `hcl:"replicas,optional"`
 
+	// The credential of docker registry.
+	Auth *AuthConfig `hcl:"auth,block"`
+
 	// Environment variables that are meant to configure the application in a static
 	// way. This might be control an image that has multiple modes of operation,
 	// selected via environment variable. Most configuration should use the waypoint
@@ -218,8 +234,15 @@ type Config struct {
 	ServicePort uint `hcl:"service_port,optional"`
 }
 
+// AuthConfig maps the the Nomad Docker driver 'auth' config block
+// and is used to set credentials for pulling images from the registry
+type AuthConfig struct {
+	Username string `hcl:"username"`
+	Password string `hcl:"password"`
+}
+
 func (p *Platform) Documentation() (*docs.Documentation, error) {
-	doc, err := docs.New(docs.FromConfig(&Config{}))
+	doc, err := docs.New(docs.FromConfig(&Config{}), docs.FromFunc(p.DeployFunc()))
 	if err != nil {
 		return nil, err
 	}
@@ -229,16 +252,20 @@ func (p *Platform) Documentation() (*docs.Documentation, error) {
 	doc.Example(
 		`
 deploy {
-	use "nomad" {
-	  region = "global"
-	  datacenter = "dc1"
-	  static_environment = {
-	    "environment": "production",
-	    "LOG_LEVEL": "debug"
-	  }
-	  service_port = 3000
-	  replicas = 1
-	}
+        use "nomad" {
+          region = "global"
+          datacenter = "dc1"
+          auth = {
+            username = "username"
+            password = "password"
+          }
+          static_environment = {
+            "environment": "production",
+            "LOG_LEVEL": "debug"
+          }
+          service_port = 3000
+          replicas = 1
+        }
 }
 `)
 
@@ -263,6 +290,11 @@ deploy {
 		"replicas",
 		"The replica count for the job.",
 		docs.Default("1"),
+	)
+
+	doc.SetField(
+		"auth",
+		"The credentials for docker registry.",
 	)
 
 	doc.SetField(

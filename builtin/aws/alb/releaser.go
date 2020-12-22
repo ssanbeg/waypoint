@@ -6,15 +6,14 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 	"github.com/aws/aws-sdk-go/service/route53"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/waypoint/builtin/aws/utils"
 	"github.com/hashicorp/waypoint-plugin-sdk/component"
 	"github.com/hashicorp/waypoint-plugin-sdk/docs"
 	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
+	"github.com/hashicorp/waypoint/builtin/aws/utils"
 )
 
 type Releaser struct {
@@ -39,7 +38,12 @@ func (r *Releaser) Release(
 	ui terminal.UI,
 	target *TargetGroup,
 ) (*Release, error) {
-	sess := session.New(aws.NewConfig().WithRegion(target.Region))
+	sess, err := utils.GetSession(&utils.SessionConfig{
+		Region: target.Region,
+	})
+	if err != nil {
+		return nil, err
+	}
 	elbsrv := elbv2.New(sess)
 
 	lbName := r.config.Name
