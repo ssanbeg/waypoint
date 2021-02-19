@@ -22,16 +22,27 @@ import (
 )
 
 type Client struct {
-	Logger        hclog.Logger
-	UI            terminal.UI
-	Context       context.Context
-	Client        pb.WaypointClient
+	Logger  hclog.Logger
+	UI      terminal.UI
+	Context context.Context
+	Client  pb.WaypointClient
+	Args    []string
+	Stdin   io.Reader
+	Stdout  io.Writer
+	Stderr  io.Writer
+
+	// Either DeploymentId or InstanceId have to be set. If both are set, then
+	// InstanceId takes priority.
+	//
+	// These identify a deployment that is used to search for an instance on
+	// server side. We target a specific deployment so that the exec session
+	// enters the correct application code.
 	DeploymentId  string
 	DeploymentSeq uint64
-	Args          []string
-	Stdin         io.Reader
-	Stdout        io.Writer
-	Stderr        io.Writer
+
+	// If set, will cause the server to connect to this specific
+	// instance.
+	InstanceId string
 }
 
 func (c *Client) Run() (int, error) {
@@ -82,14 +93,25 @@ func (c *Client) Run() (int, error) {
 		status.Update("Initializing session...")
 	}
 
+	start := &pb.ExecStreamRequest_Start{
+		Args: c.Args,
+		Pty:  ptyReq,
+	}
+
+	if c.InstanceId != "" {
+		start.Target = &pb.ExecStreamRequest_Start_InstanceId{
+			InstanceId: c.InstanceId,
+		}
+	} else {
+		start.Target = &pb.ExecStreamRequest_Start_DeploymentId{
+			DeploymentId: c.DeploymentId,
+		}
+	}
+
 	// Send the start event
 	if err := client.Send(&pb.ExecStreamRequest{
 		Event: &pb.ExecStreamRequest_Start_{
-			Start: &pb.ExecStreamRequest_Start{
-				DeploymentId: c.DeploymentId,
-				Args:         c.Args,
-				Pty:          ptyReq,
-			},
+			Start: start,
 		},
 	}); err != nil {
 		return 0, err
@@ -120,7 +142,7 @@ func (c *Client) Run() (int, error) {
 
 	if ptyF != nil {
 		// We need to go into raw mode with stdin
-		if f, ok := c.Stdin.(*os.File); ok {
+		if f, ok := c.Stdout.(*os.File); ok {
 			oldState, err := sshterm.MakeRaw(int(f.Fd()))
 			if err != nil {
 				return 0, err
@@ -209,7 +231,9 @@ func (c *Client) Run() (int, error) {
 		for {
 			resp, err := client.Recv()
 			if err != nil {
-				c.Logger.Error("receive error", "err", err)
+				if err != io.EOF {
+					c.Logger.Error("receive error", "err", err)
+				}
 				return
 			}
 
@@ -228,10 +252,12 @@ func (c *Client) Run() (int, error) {
 		case resp := <-recvCh:
 			switch event := resp.Event.(type) {
 			case *pb.ExecStreamResponse_Output_:
-				// TODO: stderr
-				out := c.Stdout
-				io.Copy(out, bytes.NewReader(event.Output.Data))
-
+				switch event.Output.Channel {
+				case pb.ExecStreamResponse_Output_STDOUT:
+					io.Copy(c.Stdout, bytes.NewReader(event.Output.Data))
+				case pb.ExecStreamResponse_Output_STDERR:
+					io.Copy(c.Stderr, bytes.NewReader(event.Output.Data))
+				}
 			case *pb.ExecStreamResponse_Exit_:
 				return int(event.Exit.Code), nil
 

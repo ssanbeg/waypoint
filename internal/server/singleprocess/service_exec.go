@@ -1,13 +1,18 @@
 package singleprocess
 
 import (
+	"context"
 	"io"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/go-memdb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/hashicorp/waypoint/internal/server"
 	pb "github.com/hashicorp/waypoint/internal/server/gen"
+	"github.com/hashicorp/waypoint/internal/server/grpcmetadata"
 	"github.com/hashicorp/waypoint/internal/server/singleprocess/state"
 )
 
@@ -27,8 +32,6 @@ func (s *service) StartExecStream(
 		return status.Errorf(codes.FailedPrecondition,
 			"first message must be start type")
 	}
-	log = log.With("deployment_id", start.Start.DeploymentId)
-	log.Debug("exec requested", "args", start.Start.Args)
 
 	// Create our exec. We have to populate everything here first because
 	// once we register, this will trigger any watchers to be notified of
@@ -40,13 +43,140 @@ func (s *service) StartExecStream(
 		Pty:               start.Start.Pty,
 		ClientEventCh:     clientEventCh,
 		EntrypointEventCh: eventCh,
+		Context:           srv.Context(),
 	}
 
 	// Register the exec session
-	err = s.state.InstanceExecCreateByDeployment(start.Start.DeploymentId, execRec)
-	if err != nil {
-		return err
+	switch t := start.Start.Target.(type) {
+	case *pb.ExecStreamRequest_Start_InstanceId:
+		log = log.With("instance_id", t.InstanceId)
+		err = s.state.InstanceExecCreateByTargetedInstance(t.InstanceId, execRec)
+		if err != nil {
+			return err
+		}
+	case *pb.ExecStreamRequest_Start_DeploymentId:
+		log = log.With("deployment_id", t.DeploymentId)
+
+		deployment, err := s.state.DeploymentGet(&pb.Ref_Operation{
+			Target: &pb.Ref_Operation_Id{
+				Id: t.DeploymentId,
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		// We need to spawn a job that will in turn spawn a virtual CEB
+		// that will connect back and create an instance exec record for us
+		// to use.
+		if deployment.HasExecPlugin {
+			instId, err := server.Id()
+			if err != nil {
+				return err
+			}
+
+			log.Info("spawning exec plugin via job", "instance-id", instId)
+
+			job := &pb.Job{
+				Workspace:   deployment.Workspace,
+				Application: deployment.Application,
+				Operation: &pb.Job_Exec{
+					Exec: &pb.Job_ExecOp{
+						InstanceId: instId,
+						Deployment: deployment,
+					},
+				},
+			}
+
+			// Means the client WANTS the job run on itself, so let's target the
+			// job back to it.
+			if runnerId, ok := grpcmetadata.RunnerId(srv.Context()); ok {
+				job.DataSource = &pb.Job_DataSource{
+					Source: &pb.Job_DataSource_Local{
+						Local: &pb.Job_Local{},
+					},
+				}
+
+				job.TargetRunner = &pb.Ref_Runner{
+					Target: &pb.Ref_Runner_Id{
+						Id: &pb.Ref_RunnerId{
+							Id: runnerId,
+						},
+					},
+				}
+
+				// Otherwise, the client wants an exec session but doesn't have a runner
+				// to use, so we just target any runner.
+			} else {
+				job.TargetRunner = &pb.Ref_Runner{
+					Target: &pb.Ref_Runner_Any{
+						Any: &pb.Ref_RunnerAny{},
+					},
+				}
+
+				// We leave DataSource unset here so that QueueJob will port over the data
+				// source from the project.
+			}
+
+			qresp, err := s.QueueJob(srv.Context(), &pb.QueueJobRequest{
+				Job: job,
+
+				// TODO unknown if this is enough time for when the request is queued
+				// by a runner-less client but a user waiting 60 seconds will get impatient
+				// regardless.
+				ExpiresIn: "60s",
+			})
+			if err != nil {
+				return err
+			}
+
+			jobId := qresp.JobId
+
+			// Be sure that if we decide things aren't going well, the job doesn't outlive
+			// it's usefulness.
+			defer s.state.JobCancel(jobId, false)
+
+			log.Debug("waiting on job state", "job-id", jobId)
+
+			state, err := s.waitOnJobStarted(srv.Context(), jobId)
+			if err != nil {
+				return err
+			}
+
+			switch state {
+			case pb.Job_ERROR:
+				return status.Errorf(codes.FailedPrecondition, "job errored out before starting")
+			case pb.Job_SUCCESS:
+				return status.Errorf(codes.Internal, "job succeeded before running")
+			case pb.Job_RUNNING:
+				// ok
+			default:
+				return status.Errorf(codes.Internal, "unexpected job status: %s", state.String())
+			}
+
+			// If the virtual instance doesn't show up in 60 seconds, just time out and return
+			// an error.
+			ctx, cancel := context.WithTimeout(srv.Context(), 60*time.Second)
+			defer cancel()
+
+			err = s.state.InstanceExecCreateForVirtualInstance(ctx, instId, execRec)
+			if err != nil {
+				return err
+			}
+		} else {
+			err = s.state.InstanceExecCreateByDeployment(t.DeploymentId, execRec)
+			if err != nil {
+				return err
+			}
+		}
+	default:
+		log.Error("exec request sent neither instance id nor deployment id")
+
+		return status.Errorf(codes.FailedPrecondition,
+			"request sent neither instance id nor deployment id")
 	}
+
+	log.Debug("exec requested", "args", start.Start.Args)
 
 	// Make sure we always deregister it
 	defer s.state.InstanceExecDelete(execRec.Id)
@@ -139,6 +269,18 @@ func (s *service) handleEntrypointExecRequest(
 				},
 			},
 		}
+	case *pb.EntrypointExecRequest_Error_:
+		log.Warn("error observed processing entrypoint exec stream", "error", event.Error.Error)
+		exit = true
+		send = &pb.ExecStreamResponse{
+			Event: &pb.ExecStreamResponse_Exit_{
+				Exit: &pb.ExecStreamResponse_Exit{
+					Code: 1,
+				},
+			},
+		}
+	default:
+		log.Warn("unimplemented exec entrypoint message seen", "event", hclog.Fmt("%T", event))
 	}
 
 	// Send our response
@@ -150,4 +292,48 @@ func (s *service) handleEntrypointExecRequest(
 	}
 
 	return exit, nil
+}
+
+// Wait for the given job to reach a state where it has been been acted upon in some manner.
+func (s *service) waitOnJobStarted(ctx context.Context, jobId string) (pb.Job_State, error) {
+	log := hclog.FromContext(ctx)
+
+	// Get the job
+	ws := memdb.NewWatchSet()
+	job, err := s.state.JobById(jobId, ws)
+	if err != nil {
+		return 0, err
+	}
+	if job == nil {
+		return 0, status.Errorf(codes.NotFound, "job not found for ID: %s", jobId)
+	}
+
+	log = log.With("job_id", job.Id)
+
+	for {
+		switch job.State {
+		case pb.Job_ERROR, pb.Job_RUNNING, pb.Job_SUCCESS:
+			return job.State, nil
+		}
+
+		// Wait for the job to update
+		if err := ws.WatchCtx(ctx); err != nil {
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
+			}
+
+			return 0, err
+
+		}
+
+		// Updated job, requery it
+		ws = memdb.NewWatchSet()
+		job, err = s.state.JobById(job.Id, ws)
+		if err != nil {
+			return 0, err
+		}
+		if job == nil {
+			return 0, status.Errorf(codes.Internal, "job disappeared for ID: %s", jobId)
+		}
+	}
 }

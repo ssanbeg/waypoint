@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/mitchellh/mapstructure"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -24,6 +26,9 @@ import (
 const (
 	labelId    = "waypoint.hashicorp.com/id"
 	labelNonce = "waypoint.hashicorp.com/nonce"
+
+	// TODO Evaluate if this should remain as a default 3000 to another port.
+	DefaultServicePort = 3000
 )
 
 // Platform is the Platform implementation for Kubernetes.
@@ -131,15 +136,25 @@ func (p *Platform) Deploy(
 		return nil, err
 	}
 
-	if p.config.ServicePort == 0 {
-		p.config.ServicePort = 3000
+	if p.config.ServicePort == 0 && p.config.Ports == nil {
+		// nothing defined, set up the defaults
+		p.config.Ports = make([]map[string]string, 1)
+		p.config.Ports[0] = map[string]string{"port": strconv.Itoa(DefaultServicePort), "name": "http"}
+	} else if p.config.ServicePort > 0 && p.config.Ports == nil {
+		// old ServicePort var is used, so set it up in our Ports map to be used
+		p.config.Ports = make([]map[string]string, 1)
+		p.config.Ports[0] = map[string]string{"port": strconv.Itoa(int(p.config.ServicePort)), "name": "http"}
+	} else if p.config.ServicePort > 0 && len(p.config.Ports) > 0 {
+		// both defined, this is an error
+		return nil, fmt.Errorf("Cannot define both 'service_port' and 'ports'. Use" +
+			" 'ports' for configuring multiple container ports.")
 	}
 
 	// Build our env vars
 	env := []corev1.EnvVar{
 		{
 			Name:  "PORT",
-			Value: fmt.Sprint(p.config.ServicePort),
+			Value: fmt.Sprint(p.config.Ports[0]["port"]),
 		},
 	}
 
@@ -175,6 +190,56 @@ func (p *Platform) Deploy(
 		pullPolicy = ""
 	}
 
+	// Get container resource limits and requests
+	var resourceLimits = make(map[corev1.ResourceName]resource.Quantity)
+	var resourceRequests = make(map[corev1.ResourceName]resource.Quantity)
+
+	for k, v := range p.config.Resources {
+		if strings.HasPrefix(k, "limits_") {
+			limitKey := strings.Split(k, "_")
+			resourceName := corev1.ResourceName(limitKey[1])
+
+			quantity, err := resource.ParseQuantity(v)
+			if err != nil {
+				return nil, err
+			}
+			resourceLimits[resourceName] = quantity
+		} else if strings.HasPrefix(k, "requests_") {
+			reqKey := strings.Split(k, "_")
+			resourceName := corev1.ResourceName(reqKey[1])
+
+			quantity, err := resource.ParseQuantity(v)
+			if err != nil {
+				return nil, err
+			}
+			resourceRequests[resourceName] = quantity
+		} else {
+			log.Warn("ignoring unrecognized k8s resources key: %q", k)
+		}
+	}
+
+	resourceRequirements := corev1.ResourceRequirements{
+		Limits:   resourceLimits,
+		Requests: resourceRequests,
+	}
+
+	containerPorts := make([]corev1.ContainerPort, len(p.config.Ports))
+	for i, cp := range p.config.Ports {
+		hostPort, _ := strconv.ParseInt(cp["host_port"], 10, 32)
+		port, _ := strconv.ParseInt(cp["port"], 10, 32)
+
+		containerPorts[i] = corev1.ContainerPort{
+			Name:          cp["name"],
+			ContainerPort: int32(port),
+			HostPort:      int32(hostPort),
+			HostIP:        cp["host_ip"],
+			Protocol:      corev1.ProtocolTCP,
+		}
+	}
+
+	// assume the first port defined is the 'main' port to use
+	defaultPort := int(containerPorts[0].ContainerPort)
+
 	// Update the deployment with our spec
 	deployment.Spec.Template.Spec = corev1.PodSpec{
 		Containers: []corev1.Container{
@@ -182,16 +247,11 @@ func (p *Platform) Deploy(
 				Name:            result.Name,
 				Image:           img.Name(),
 				ImagePullPolicy: pullPolicy,
-				Ports: []corev1.ContainerPort{
-					{
-						Name:          "http",
-						ContainerPort: int32(p.config.ServicePort),
-					},
-				},
+				Ports:           containerPorts,
 				LivenessProbe: &corev1.Probe{
 					Handler: corev1.Handler{
 						TCPSocket: &corev1.TCPSocketAction{
-							Port: intstr.FromInt(int(p.config.ServicePort)),
+							Port: intstr.FromInt(defaultPort),
 						},
 					},
 					InitialDelaySeconds: 5,
@@ -201,13 +261,14 @@ func (p *Platform) Deploy(
 				ReadinessProbe: &corev1.Probe{
 					Handler: corev1.Handler{
 						TCPSocket: &corev1.TCPSocketAction{
-							Port: intstr.FromInt(int(p.config.ServicePort)),
+							Port: intstr.FromInt(defaultPort),
 						},
 					},
 					InitialDelaySeconds: 5,
 					TimeoutSeconds:      5,
 				},
-				Env: env,
+				Env:       env,
+				Resources: resourceRequirements,
 			},
 		},
 	}
@@ -218,7 +279,7 @@ func (p *Platform) Deploy(
 			Handler: corev1.Handler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: p.config.ProbePath,
-					Port: intstr.FromInt(int(p.config.ServicePort)),
+					Port: intstr.FromInt(defaultPort),
 				},
 			},
 			InitialDelaySeconds: 5,
@@ -230,7 +291,7 @@ func (p *Platform) Deploy(
 			Handler: corev1.Handler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: p.config.ProbePath,
-					Port: intstr.FromInt(int(p.config.ServicePort)),
+					Port: intstr.FromInt(defaultPort),
 				},
 			},
 			InitialDelaySeconds: 5,
@@ -368,7 +429,9 @@ func (p *Platform) Deploy(
 				}
 
 				if cs.State.Waiting != nil {
-					if cs.State.Waiting.Reason == "ImagePullBackOff" {
+					// TODO: handle other pod failures here
+					if cs.State.Waiting.Reason == "ImagePullBackOff" ||
+						cs.State.Waiting.Reason == "ErrImagePull" {
 						detectedError = "Pod unable to access Docker image"
 						k8error = cs.State.Waiting.Message
 					}
@@ -377,17 +440,15 @@ func (p *Platform) Deploy(
 		}
 
 		if detectedError != "" && !reportedError {
-			step.Update("Detected pods having an issue starting - %s: %s", detectedError, k8error)
-			step.Status(terminal.StatusWarn)
+			// we use ui output here instead of a step group, otherwise the warning
+			// gets swallowed up on the next poll iteration
+			ui.Output("Detected pods having an issue starting - %s: %s",
+				detectedError, k8error, terminal.WithWarningStyle())
 			reportedError = true
 
 			// force a faster rerender
 			lastStatus = time.Time{}
 		}
-
-		// TODO: Report the statuses and events of the pods that are starting
-		// here so that users know why stuff isn't starting. Most commonly here
-		// it's going to be an error pulling the image.
 
 		return false, nil
 	})
@@ -441,9 +502,10 @@ func (p *Platform) Destroy(
 
 // Config is the configuration structure for the Platform.
 type Config struct {
-	// KubeconfigPath is the path to the kubeconfig file. If this is
-	// blank then we default to the home directory.
-	KubeconfigPath string `hcl:"kubeconfig,optional"`
+	// Annotations are added to the pod spec of the deployed application.  This is
+	// useful when using mutating webhook admission controllers to further process
+	// pod events.
+	Annotations map[string]string `hcl:"annotations,optional"`
 
 	// Context specifies the kube context to use.
 	Context string `hcl:"context,optional"`
@@ -452,44 +514,50 @@ type Config struct {
 	// outside waypoint, for instance by a pod autoscaler, do not set this variable.
 	Count int32 `hcl:"replicas,optional"`
 
-	// If set, this is the HTTP path to request to test that the application
-	// is up and running. Without this, we only test that a connection can be
-	// made to the port.
-	ProbePath string `hcl:"probe_path,optional"`
-
-	// A path to a directory that will be created for the service to store
-	// temporary data.
-	ScratchSpace string `hcl:"scratch_path,optional"`
-
 	// The name of the Kubernetes secret to use to pull the image stored
 	// in the registry.
 	// TODO This maybe should be required because the vast majority of deployments
 	// will be against private images.
 	ImageSecret string `hcl:"image_secret,optional"`
 
-	// Environment variables that are meant to configure the application in a static
-	// way. This might be control an image that has mulitple modes of operation,
-	// selected via environment variable. Most configuration should use the waypoint
-	// config commands.
-	StaticEnvVars map[string]string `hcl:"static_environment,optional"`
+	// KubeconfigPath is the path to the kubeconfig file. If this is
+	// blank then we default to the home directory.
+	KubeconfigPath string `hcl:"kubeconfig,optional"`
 
-	// Annotations are added to the pod spec of the deployed application.  This is
-	// useful when using mutating webhook admission controllers to further process
-	// pod events.
-	Annotations map[string]string `hcl:"annotations,optional"`
+	// Namespace is the Kubernetes namespace to target the deployment to.
+	Namespace string `hcl:"namespace,optional"`
+
+	// A full resource of options to define ports for your service running on the container
+	// Defaults to port 3000.
+	Ports []map[string]string `hcl:"ports,optional"`
+
+	// If set, this is the HTTP path to request to test that the application
+	// is up and running. Without this, we only test that a connection can be
+	// made to the port.
+	ProbePath string `hcl:"probe_path,optional"`
+
+	// Optionally define various resources limits for kubernetes pod containers
+	// such as memory and cpu.
+	Resources map[string]string `hcl:"resources,optional"`
+
+	// A path to a directory that will be created for the service to store
+	// temporary data.
+	ScratchSpace string `hcl:"scratch_path,optional"`
 
 	// ServiceAccount is the name of the Kubernetes service account to apply to the
 	// application deployment. This is useful to apply Kubernetes RBAC to the pod.
 	ServiceAccount string `hcl:"service_account,optional"`
 
 	// Port that your service is running on within the actual container.
-	// Defaults to port 3000.
-	// TODO Evaluate if this should remain as a default 3000, should be a required field,
-	// or default to another port.
+	// Defaults to DefaultServicePort const.
+	// NOTE: Ports and ServicePort cannot both be defined
 	ServicePort uint `hcl:"service_port,optional"`
 
-	// Namespace is the Kubernetes namespace to target the deployment to.
-	Namespace string `hcl:"namespace,optional"`
+	// Environment variables that are meant to configure the application in a static
+	// way. This might be control an image that has mulitple modes of operation,
+	// selected via environment variable. Most configuration should use the waypoint
+	// config commands.
+	StaticEnvVars map[string]string `hcl:"static_environment,optional"`
 }
 
 func (p *Platform) Documentation() (*docs.Documentation, error) {
@@ -526,6 +594,26 @@ deploy "kubernetes" {
 		docs.Summary(
 			"if the replica count is maintained outside waypoint,",
 			"for instance by a pod autoscaler, do not set this variable",
+		),
+	)
+
+	doc.SetField(
+		"resources",
+		"a map of resource limits and requests to apply to a pod on deploy",
+		docs.Summary(
+			"resource limits and requests for a pod. limits and requests options "+
+				"must start with either 'limits_' or 'requests_'. Any other options "+
+				"will be ignored.",
+		),
+	)
+
+	doc.SetField(
+		"ports",
+		"a map of ports and options that the application is listening on",
+		docs.Summary(
+			"used to define and expose multiple ports that the application is",
+			"listening on for the container in use. Available keys are 'port', 'name'",
+			", 'host_port', and 'host_ip'. Ports defined will be TCP protocol.",
 		),
 	)
 
@@ -567,7 +655,11 @@ deploy "kubernetes" {
 	doc.SetField(
 		"service_port",
 		"the TCP port that the application is listening on",
-		docs.Default("3000"),
+		docs.Default(fmt.Sprint(DefaultServicePort)),
+		docs.Summary(
+			"by default, this config variable is used for exposing a single port for",
+			"the container in use. For multi-port configuration, use 'ports' instead.",
+		),
 	)
 
 	doc.SetField(
@@ -593,7 +685,7 @@ deploy "kubernetes" {
 		"namespace",
 		"namespace to target deployment into",
 		docs.Summary(
-			"namespace is the name of the Kubernetes namespace to apply the deployment in",
+			"namespace is the name of the Kubernetes namespace to apply the deployment in.",
 			"This is useful to create deployments in non-default namespaces without creating kubeconfig contexts for each",
 		),
 	)

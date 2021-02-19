@@ -1,3 +1,66 @@
+## unreleased
+
+FEATURES:
+
+* cli: New `waypoint fmt` command will autoformat your `waypoint.hcl` files [GH-1037]
+
+IMPROVEMENTS:
+
+* plugin/docker: support for building, pulling, and pushing Docker images without a Docker daemon available. [GH-970]
+* plugin/k8s: plugin will attempt in-cluster auth first if no kubeconfig file is specified [GH-1103]
+
+BUG FIXES:
+
+## 0.2.2 (February 17, 2021)
+
+FEATURES:
+
+IMPROVEMENTS:
+
+* builtin/aws/ecs: Add config option for disabling the load balancer [GH-1082]
+* builtin/aws/ecs: Add awslog driver configuration [GH-1089]
+* builtin/docker: Add Binds, Labels and Networks config options for deploy [GH-1065]
+* builtin/k8s: Support multi-port application configs for deploy and release [GH-1092]
+* cli/main: Add -version flag for CLI version [GH-1049]
+
+BUG FIXES:
+
+* bulitin/aws/ecs: Determine load balancer and target group for pre-existing listeners [GH-1085]
+* builtin/aws/ecs: fix listener deletion on deployment deletion [GH-1087]
+* builtin/k8s: Handle application config sync with K8s and Secrets [GH-1073]
+* cli/hostname: fix panic with no hostname arg specified [GH-1044]
+* core: Fix empty gitreftag response in config [GH-1047]
+
+## 0.2.1 (February 02, 2021)
+
+FEATURES:
+
+* **Uninstall command for all server platforms**:
+Use `server uninstall` to remove the Waypoint server and artifacts from the
+specified `-platform` for the active server installation. [GH-972]
+* **Upgrade command for all server platforms**:
+Use `server upgrade` to upgrade the Waypoint server for the
+specified `-platform` for the active server installation. [GH-976]
+
+IMPROVEMENTS:
+
+* builtin/k8s: Allow for defined resource limits for pods [GH-1041]
+* cli: `server run` supports specifying a custom TLS certificate [GH-951]
+* cli: more informative error messages on `install` [GH-1004]
+* server: store platform where server is installed to in server config [GH-1000]
+* serverinstall/docker: Start waypoint server container if stopped on install [GH-1009]
+* serverinstall/k8s: Allow using k8s context [GH-1028]
+
+BUG FIXES:
+
+* builtin/aws/ami: require []string for aws-ami filters to avoid panic [GH-1010]
+* cli: ctrl-c now interrupts server connection attempts [GH-989]
+* entrypoint: log disconnect messages will now only be emitted at the ERROR level if reconnection fails [GH-930]
+* server: don't block startup on URL service being unavailable [GH-950]
+* server: `UpsertProject` will not delete all application metadata [GH-1027]
+* server: increase timeout for hostname registration [GH-1040]
+* plugin/google-cloud-run: fix error on deploys about missing type [GH-955]
+
 ## 0.2.0 (December 10, 2020)
 
 FEATURES:

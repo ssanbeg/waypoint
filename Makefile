@@ -1,5 +1,3 @@
-# A lot of this Makefile right now is temporary since we have a private
-# repo so that we can more sanely create
 ASSETFS_PATH?=internal/server/gen/bindata_ui.go
 
 GIT_COMMIT=$$(git rev-parse --short HEAD)
@@ -26,6 +24,10 @@ bin/windows: # create windows binaries
 bin/entrypoint: # create the entrypoint for the current platform
 	CGO_ENABLED=0 go build -tags assetsembedded -o ./waypoint-entrypoint ./cmd/waypoint-entrypoint
 
+.PHONY: install
+install: bin # build and copy binaries to $GOPATH/bin/waypoint
+	cp ./waypoint $(GOPATH)/bin/waypoint
+
 .PHONY: test
 test: # run tests
 	go test ./...
@@ -34,8 +36,8 @@ test: # run tests
 format: # format go code
 	gofmt -s -w ./
 
-.PHONY: docker/mitchellh
-docker/mitchellh:
+.PHONY: docker/server
+docker/server:
 	DOCKER_BUILDKIT=1 docker build \
 					--ssh default \
 					--secret id=ssh.config,src="${HOME}/.ssh/config" \

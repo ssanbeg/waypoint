@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/waypoint/internal/config"
 	"github.com/hashicorp/waypoint/internal/pkg/flag"
 	pb "github.com/hashicorp/waypoint/internal/server/gen"
+	"github.com/hashicorp/waypoint/internal/server/grpcmetadata"
 )
 
 // baseCommand is embedded in all commands to provide common logic and data.
@@ -302,6 +303,12 @@ func (c *baseCommand) DoApp(ctx context.Context, f func(context.Context, *client
 		apps = append(apps, app)
 	}
 
+	// Inject the metadata about the client, such as the runner id if it is running
+	// a local runner.
+	if id, ok := c.project.LocalRunnerId(); ok {
+		ctx = grpcmetadata.AddRunner(ctx, id)
+	}
+
 	// Just a serialize loop for now, one day we'll parallelize.
 	var finalErr error
 	var didErrSentinel bool
@@ -446,4 +453,10 @@ so you can specify the app to target using the "-app" flag.
 `)
 
 	reAppTarget = regexp.MustCompile(`^(?P<project>[-0-9A-Za-z_]+)/(?P<app>[-0-9A-Za-z_]+)$`)
+
+	snapshotUnimplementedErr = strings.TrimSpace(`
+The current Waypoint server does not support snapshots. Rerunning the command
+with '-snapshot=false' is required, and there will be no automatic data backups
+for the server.
+`)
 )

@@ -108,6 +108,18 @@ func TestWithURLService(t testing.T, out *hzntest.DevSetup) Option {
 	}
 }
 
+// TestWithURLServiceGuestAccount sets the API token to empty to force
+// getting a guest account with the URL service. This can ONLY be set if
+// TestWithURLService is set before this.
+func TestWithURLServiceGuestAccount(t testing.T) Option {
+	return func(s *service, cfg *config) error {
+		// Set the API token to empty which will force a guest account registration.
+		cfg.serverConfig.URL.APIToken = ""
+
+		return nil
+	}
+}
+
 func TestEntrypoint(t testing.T, client pb.WaypointClient) (string, string, func()) {
 	instanceId, err := server.Id()
 	require.NoError(t, err)
@@ -119,6 +131,41 @@ func TestEntrypoint(t testing.T, client pb.WaypointClient) (string, string, func
 			Component: &pb.Component{
 				Name: "testapp",
 			},
+		}),
+	})
+	require.NoError(t, err)
+
+	dep := resp.Deployment
+
+	// Create the config
+	stream, err := client.EntrypointConfig(ctx, &pb.EntrypointConfigRequest{
+		InstanceId:   instanceId,
+		DeploymentId: dep.Id,
+	})
+	require.NoError(t, err)
+
+	// Wait for the first config so that we know we're registered
+	_, err = stream.Recv()
+	require.NoError(t, err)
+
+	return instanceId, dep.Id, func() {
+		stream.CloseSend()
+	}
+}
+
+func TestEntrypointPlugin(t testing.T, client pb.WaypointClient) (string, string, func()) {
+	instanceId, err := server.Id()
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	resp, err := client.UpsertDeployment(ctx, &pb.UpsertDeploymentRequest{
+		Deployment: serverptypes.TestValidDeployment(t, &pb.Deployment{
+			Component: &pb.Component{
+				Name: "testapp",
+			},
+
+			HasExecPlugin: true,
 		}),
 	})
 	require.NoError(t, err)
